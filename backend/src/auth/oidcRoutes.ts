@@ -61,7 +61,7 @@ type RegisterOidcRoutesDeps = {
       clientId: string | null;
       clientSecret: string | null;
       redirectUri: string | null;
-      idTokenSignedResponseAlg: string;
+      idTokenSignedResponseAlg: string | null;
       scopes: string;
       emailClaim: string;
       emailVerifiedClaim: string;
@@ -84,6 +84,23 @@ const requestUsesHttps = (req: Request): boolean => {
 };
 
 const normalizeEmail = (value: string): string => value.trim().toLowerCase();
+
+const resolveIdTokenSignedResponseAlg = (
+  configuredAlg: string | null,
+  issuerMetadata: { id_token_signing_alg_values_supported?: unknown }
+): string => {
+  if (configuredAlg) return configuredAlg;
+
+  const advertised = issuerMetadata.id_token_signing_alg_values_supported;
+  if (Array.isArray(advertised)) {
+    const first = advertised.find(
+      (value): value is string => typeof value === "string" && value.trim().length > 0
+    );
+    if (first) return first;
+  }
+
+  return "RS256";
+};
 
 const sanitizeReturnTo = (rawValue: unknown): string => {
   if (typeof rawValue !== "string") return "/";
@@ -265,13 +282,17 @@ export const registerOidcRoutes = (deps: RegisterOidcRoutesDeps) => {
           hasClientSecret: Boolean(config.oidc.clientSecret),
           supported: supportedMethods,
         });
+        const idTokenSignedResponseAlg = resolveIdTokenSignedResponseAlg(
+          config.oidc.idTokenSignedResponseAlg,
+          (issuer as any)?.metadata ?? {}
+        );
 
         const clientConfig: Record<string, unknown> = {
           client_id: config.oidc.clientId as string,
           redirect_uris: [config.oidc.redirectUri as string],
           response_types: ["code"],
           token_endpoint_auth_method: tokenEndpointAuthMethod,
-          id_token_signed_response_alg: config.oidc.idTokenSignedResponseAlg,
+          id_token_signed_response_alg: idTokenSignedResponseAlg,
         };
 
         if (config.oidc.clientSecret) {

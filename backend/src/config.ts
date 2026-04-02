@@ -37,7 +37,7 @@ interface OidcConfig {
   clientId: string | null;
   clientSecret: string | null;
   redirectUri: string | null;
-  idTokenSignedResponseAlg: string;
+  idTokenSignedResponseAlg: string | null;
   scopes: string;
   emailClaim: string;
   emailVerifiedClaim: string;
@@ -73,9 +73,10 @@ const getOptionalTrimmedEnv = (key: string): string | null => {
   return trimmed.length > 0 ? trimmed : null;
 };
 
-const getOptionalOidcSigningAlg = (key: string, defaultValue: string): string => {
+const getOptionalOidcSigningAlg = (key: string): string | null => {
   const raw = process.env[key];
-  const normalized = (raw || defaultValue).trim();
+  if (!raw) return null;
+  const normalized = raw.trim();
 
   if (normalized.length === 0 || normalized.toLowerCase() === "none") {
     throw new Error(`${key} must not be empty or 'none'`);
@@ -198,9 +199,9 @@ const resolveOidcConfig = (authMode: AuthMode): OidcConfig => {
   }
 
   const idTokenSignedResponseAlg = enabled
-    ? getOptionalOidcSigningAlg("OIDC_ID_TOKEN_SIGNED_RESPONSE_ALG", "RS256")
-    : "RS256";
-  if (enabled && /^HS/i.test(idTokenSignedResponseAlg) && !clientSecret) {
+    ? getOptionalOidcSigningAlg("OIDC_ID_TOKEN_SIGNED_RESPONSE_ALG")
+    : null;
+  if (enabled && idTokenSignedResponseAlg && /^HS/i.test(idTokenSignedResponseAlg) && !clientSecret) {
     throw new Error(
       "OIDC_ID_TOKEN_SIGNED_RESPONSE_ALG using HS* requires OIDC_CLIENT_SECRET for a confidential client"
     );

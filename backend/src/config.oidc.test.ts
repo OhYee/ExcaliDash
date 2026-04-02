@@ -25,7 +25,7 @@ describe("OIDC signing algorithm config", () => {
 
     const { config } = await loadConfig();
 
-    expect(config.oidc.idTokenSignedResponseAlg).toBe("RS256");
+    expect(config.oidc.idTokenSignedResponseAlg).toBeNull();
   });
 
   it("accepts an explicit configured algorithm", async () => {
@@ -54,7 +54,7 @@ describe("OIDC signing algorithm config", () => {
     const { config } = await loadConfig();
 
     expect(config.oidc.enabled).toBe(false);
-    expect(config.oidc.idTokenSignedResponseAlg).toBe("RS256");
+    expect(config.oidc.idTokenSignedResponseAlg).toBeNull();
   });
 
   it("requires a client secret for HS algorithms", async () => {
