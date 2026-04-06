@@ -227,6 +227,7 @@ app.use((req, res, next) => {
 
 const shouldEnforceHttps =
   config.nodeEnv === "production" &&
+  config.enforceHttpsRedirect &&
   allowedOrigins.some((origin) => origin.toLowerCase().startsWith("https://"));
 
 if (shouldEnforceHttps) {

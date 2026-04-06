@@ -23,6 +23,7 @@ interface Config {
   enablePasswordReset: boolean;
   enableRefreshTokenRotation: boolean;
   enableAuditLogging: boolean;
+  enforceHttpsRedirect: boolean;
   bootstrapSetupCodeTtlMs: number;
   bootstrapSetupCodeMaxAttempts: number;
 }
@@ -243,6 +244,7 @@ export const config: Config = {
   enablePasswordReset: getOptionalBoolean("ENABLE_PASSWORD_RESET", false),
   enableRefreshTokenRotation: getOptionalBoolean("ENABLE_REFRESH_TOKEN_ROTATION", true),
   enableAuditLogging: getOptionalBoolean("ENABLE_AUDIT_LOGGING", false),
+  enforceHttpsRedirect: getOptionalBoolean("ENFORCE_HTTPS_REDIRECT", true),
   bootstrapSetupCodeTtlMs: getRequiredEnvNumber("BOOTSTRAP_SETUP_CODE_TTL_MS", 15 * 60 * 1000),
   bootstrapSetupCodeMaxAttempts: getRequiredEnvNumber("BOOTSTRAP_SETUP_CODE_MAX_ATTEMPTS", 10),
 };
