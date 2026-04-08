@@ -266,6 +266,8 @@ export const Editor: React.FC = () => {
   const remoteFlushRafIdRef = useRef<number | null>(null);
   /** Map of fileId → Promise<accessUrl> for in-flight S3 uploads. */
   const pendingS3UploadsRef = useRef<Record<string, Promise<string>>>({});
+  /** File IDs present at initial drawing load — skip S3 re-upload for these. */
+  const initialFileIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     setAutoHideEnabled(getStoredAutoHideEnabled());
@@ -1391,6 +1393,7 @@ export const Editor: React.FC = () => {
         latestFilesRef.current = files;
         lastSyncedFilesRef.current = files;
         lastPersistedFilesRef.current = files;
+        initialFileIdsRef.current = new Set(Object.keys(files));
         currentDrawingVersionRef.current = typeof data.version === "number" ? data.version : null;
         lastPersistedElementsRef.current = elements;
 
@@ -1605,6 +1608,42 @@ export const Editor: React.FC = () => {
       return;
     }
     latestElementsRef.current = allElements;
+
+    // Detect newly-added base64 images (e.g. from paste) and kick off S3
+    // uploads.  The addFiles patch only fires for external callers; Excalidraw
+    // 0.18+ processes pasted images internally, so we catch them here.
+    for (const [fid, file] of Object.entries(currentFiles)) {
+      if (
+        fid &&
+        !initialFileIdsRef.current.has(fid) &&
+        typeof (file as any)?.dataURL === "string" &&
+        (file as any).dataURL.startsWith("data:") &&
+        !pendingS3UploadsRef.current[fid]
+      ) {
+        const blob = dataURLToBlob((file as any).dataURL);
+        if (blob) {
+          const uploadPromise = (async () => {
+            const fileObj = new File(
+              [blob],
+              `${fid}.${blob.type.includes("/") ? blob.type.split("/")[1] : "png"}`,
+              { type: blob.type }
+            );
+            const accessUrl = await tryUploadFileToS3Ref.current?.(fid, fileObj) ?? null;
+            if (accessUrl) {
+              if (latestFilesRef.current?.[fid]) {
+                latestFilesRef.current = {
+                  ...latestFilesRef.current,
+                  [fid]: { ...latestFilesRef.current[fid], dataURL: accessUrl },
+                };
+              }
+              return accessUrl;
+            }
+            return (file as any).dataURL as string;
+          })();
+          pendingS3UploadsRef.current[fid] = uploadPromise;
+        }
+      }
+    }
 
     broadcastChanges(allElements, currentFiles);
 
