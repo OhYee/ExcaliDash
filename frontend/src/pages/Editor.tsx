@@ -245,7 +245,7 @@ export const Editor: React.FC = () => {
   const latestElementsRef = useRef<readonly any[]>([]);
   const initialSceneElementsRef = useRef<readonly any[]>([]);
   /** Stable ref that always points to the latest tryUploadFileToS3 function. */
-  const tryUploadFileToS3Ref = useRef<((fileId: string, file: File) => Promise<string | null>) | null>(null);
+  const tryUploadFileToS3Ref = useRef<((fileId: string, drawingId: string, file: File) => Promise<string | null>) | null>(null);
   const latestFilesRef = useRef<any>(null);
   const lastSyncedFilesRef = useRef<Record<string, any>>({});
   const lastSyncedElementOrderSigRef = useRef<string>("");
@@ -813,7 +813,9 @@ export const Editor: React.FC = () => {
                   `${fid}.${blob.type.includes("/") ? blob.type.split("/")[1] : "png"}`,
                   { type: blob.type }
                 );
-                const accessUrl = await tryUploadFileToS3Ref.current?.(fid, fileObj) ?? null;
+                const currentDrawingId = id;
+                if (!currentDrawingId) return file.dataURL as string;
+                const accessUrl = await tryUploadFileToS3Ref.current?.(fid, currentDrawingId, fileObj) ?? null;
                 if (accessUrl) {
                   // Replace the base64 in our local ref so the save picks it up.
                   if (latestFilesRef.current?.[fid]) {
@@ -944,13 +946,14 @@ export const Editor: React.FC = () => {
    * the upload fails (caller should fall back to the base64 data URL).
    */
   const tryUploadFileToS3 = useCallback(
-    async (fileId: string, file: File): Promise<string | null> => {
+    async (fileId: string, drawingId: string, file: File): Promise<string | null> => {
       try {
         const s3Available = await api.isS3Enabled();
         if (!s3Available) return null;
 
         const { uploadUrl, accessUrl } = await api.getS3UploadUrl(
           fileId,
+          drawingId,
           file.type || "image/png",
           file.size
         );
@@ -1628,7 +1631,9 @@ export const Editor: React.FC = () => {
               `${fid}.${blob.type.includes("/") ? blob.type.split("/")[1] : "png"}`,
               { type: blob.type }
             );
-            const accessUrl = await tryUploadFileToS3Ref.current?.(fid, fileObj) ?? null;
+            const currentDrawingId = id;
+            if (!currentDrawingId) return (file as any).dataURL as string;
+            const accessUrl = await tryUploadFileToS3Ref.current?.(fid, currentDrawingId, fileObj) ?? null;
             if (accessUrl) {
               if (latestFilesRef.current?.[fid]) {
                 latestFilesRef.current = {
@@ -1680,7 +1685,7 @@ export const Editor: React.FC = () => {
         // image still works (graceful degradation).
         const uploadResults = await Promise.allSettled(
           loadedImages.map((img, i) =>
-            tryUploadFileToS3(img.fileId, droppedImages[i]).then((url) => ({
+            tryUploadFileToS3(img.fileId, id!, droppedImages[i]).then((url) => ({
               fileId: img.fileId,
               url,
             }))

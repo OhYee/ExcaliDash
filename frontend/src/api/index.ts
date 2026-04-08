@@ -671,12 +671,13 @@ export const isS3Enabled = async (): Promise<boolean> => {
  */
 export const getS3UploadUrl = async (
   fileId: string,
+  drawingId: string,
   mimeType: string,
   size?: number
 ): Promise<{ uploadUrl: string; accessUrl: string }> => {
   const response = await api.post<{ uploadUrl: string; accessUrl: string }>(
     "/files/upload-url",
-    { fileId, mimeType, size }
+    { fileId, drawingId, mimeType, size }
   );
   return response.data;
 };

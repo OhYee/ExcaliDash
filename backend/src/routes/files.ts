@@ -86,14 +86,19 @@ export const registerFileRoutes = (
         return res.status(501).json({ error: "S3 storage is not configured" });
       }
 
-      const { fileId, mimeType, size } = req.body as {
+      const { fileId, drawingId, mimeType, size } = req.body as {
         fileId: unknown;
+        drawingId: unknown;
         mimeType: unknown;
         size: unknown;
       };
 
       if (!isValidFileId(fileId)) {
         return res.status(400).json({ error: "Invalid fileId" });
+      }
+
+      if (typeof drawingId !== "string" || drawingId.length === 0) {
+        return res.status(400).json({ error: "Invalid drawingId" });
       }
 
       if (typeof mimeType !== "string" || !ALLOWED_MIME_TYPES.has(mimeType)) {
@@ -107,7 +112,7 @@ export const registerFileRoutes = (
 
       const userId = req.user!.id;
       const ext = MIME_TO_EXT[mimeType] ?? "bin";
-      const s3Key = `${FILE_KEY_PREFIX}/${userId}/${fileId}.${ext}`;
+      const s3Key = `${FILE_KEY_PREFIX}/${userId}/${drawingId}/${fileId}.${ext}`;
 
       const uploadUrl = await generatePresignedUploadUrl(
         s3Key,
