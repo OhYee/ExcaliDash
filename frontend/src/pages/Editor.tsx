@@ -1681,8 +1681,8 @@ export const Editor: React.FC = () => {
 
     excalidrawAPI.current.updateScene({
       elements: trimmedElements,
-      captureHistory: false,
-    } as any);
+      captureUpdate: CaptureUpdateAction.NEVER,
+    });
 
     latestElementsRef.current = trimmedElements;
     lastPersistedElementsRef.current = trimmedElements;
