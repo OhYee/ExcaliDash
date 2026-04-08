@@ -806,7 +806,11 @@ export const Editor: React.FC = () => {
             const blob = dataURLToBlob(file.dataURL);
             if (blob) {
               const uploadPromise = (async () => {
-                const fileObj = new File([blob], `${fid}.${blob.type.split("/")[1] || "png"}`, { type: blob.type });
+                const fileObj = new File(
+                  [blob],
+                  `${fid}.${blob.type.includes("/") ? blob.type.split("/")[1] : "png"}`,
+                  { type: blob.type }
+                );
                 const accessUrl = await tryUploadFileToS3Ref.current?.(fid, fileObj) ?? null;
                 if (accessUrl) {
                   // Replace the base64 in our local ref so the save picks it up.
@@ -1002,10 +1006,10 @@ export const Editor: React.FC = () => {
       // Wait for any in-flight S3 uploads that still have base64 dataURLs,
       // then replace the base64 with the resolved S3 URL before persisting.
       const pendingUploads = pendingS3UploadsRef.current;
-      const pendingIds = Object.keys(pendingUploads).filter(
-        (fid) => typeof persistableFiles[fid]?.dataURL === "string" &&
-                 persistableFiles[fid].dataURL.startsWith("data:")
-      );
+      const pendingIds = Object.keys(pendingUploads).filter((fid) => {
+        const file = persistableFiles[fid];
+        return typeof file?.dataURL === "string" && file.dataURL.startsWith("data:");
+      });
       if (pendingIds.length > 0) {
         const results = await Promise.allSettled(
           pendingIds.map((fid) =>

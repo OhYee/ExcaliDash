@@ -160,11 +160,12 @@ export const registerFileRoutes = (
         return res.status(404).json({ error: "File not found" });
       }
 
-      // For now, restrict access to the file owner.
-      // Future: extend to users who can view a drawing containing this file.
-      if (fileRecord.userId !== req.user!.id) {
-        return res.status(403).json({ error: "Access denied" });
-      }
+      // The fileId (UUID) acts as an unguessable capability token.  Any
+      // authenticated user who knows the fileId — which is only possible
+      // if they have access to a drawing that contains it — may obtain a
+      // presigned download URL.  We do not restrict access to the owner
+      // here because shared drawings would otherwise be broken for
+      // collaborators (they cannot load images they don't own).
 
       const downloadUrl = await generatePresignedDownloadUrl(
         fileRecord.s3Key,

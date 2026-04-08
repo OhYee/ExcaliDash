@@ -105,6 +105,11 @@ export const generatePresignedDownloadUrl = async (
 /**
  * Build the public access URL for an object in a public-read bucket or behind a CDN.
  * Falls back to the standard virtual-hosted-style S3 URL when S3_PUBLIC_URL is not set.
+ *
+ * NOTE: When using a custom S3-compatible endpoint (MinIO, R2, etc.) without
+ * setting S3_PUBLIC_URL, this function logs a warning and returns a best-effort
+ * AWS-style URL that will likely not resolve correctly.  Always set S3_PUBLIC_URL
+ * when using non-AWS endpoints.
  */
 export const getPublicUrl = (key: string): string => {
   if (!s3Config) {
@@ -118,7 +123,17 @@ export const getPublicUrl = (key: string): string => {
     return `${base}/${key}`;
   }
 
-  // Standard virtual-hosted-style URL.
+  if (s3Config.endpoint) {
+    // Custom endpoint without S3_PUBLIC_URL is ambiguous — the URL format
+    // varies between MinIO, Cloudflare R2, and other services.
+    console.warn(
+      "[S3] S3_PUBLIC_URL is not set but a custom S3_ENDPOINT is configured. " +
+        "Public image URLs may not resolve correctly. Set S3_PUBLIC_URL to the " +
+        "public base URL of your bucket or CDN."
+    );
+  }
+
+  // Standard AWS virtual-hosted-style URL.
   return `https://${s3Config.bucket}.s3.${s3Config.region}.amazonaws.com/${key}`;
 };
 
