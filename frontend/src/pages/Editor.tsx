@@ -122,6 +122,28 @@ const loadDroppedImageData = async (file: File): Promise<DroppedImageData> => {
   };
 };
 
+/**
+ * Convert a base64 data URL to a Blob, or return null if the input is not a
+ * recognised data URL.  Used when re-encoding pasted images for S3 upload.
+ */
+const dataURLToBlob = (dataURL: string): Blob | null => {
+  try {
+    const [header, b64] = dataURL.split(",", 2);
+    if (!header || !b64) return null;
+    const mimeMatch = header.match(/data:([^;]+);base64/);
+    if (!mimeMatch) return null;
+    const mimeType = mimeMatch[1];
+    const byteChars = atob(b64);
+    const byteNums = new Uint8Array(byteChars.length);
+    for (let i = 0; i < byteChars.length; i++) {
+      byteNums[i] = byteChars.charCodeAt(i);
+    }
+    return new Blob([byteNums], { type: mimeType });
+  } catch {
+    return null;
+  }
+};
+
 // Content-based signature for detecting "live" changes even when Excalidraw doesn't
 // bump version/versionNonce/updated until commit (e.g. during shape creation drags).
 const getElementContentSig = (element: any): string => {
@@ -222,6 +244,8 @@ export const Editor: React.FC = () => {
   const animationFrameId = useRef<number>(0);
   const latestElementsRef = useRef<readonly any[]>([]);
   const initialSceneElementsRef = useRef<readonly any[]>([]);
+  /** Stable ref that always points to the latest tryUploadFileToS3 function. */
+  const tryUploadFileToS3Ref = useRef<((fileId: string, file: File) => Promise<string | null>) | null>(null);
   const latestFilesRef = useRef<any>(null);
   const lastSyncedFilesRef = useRef<Record<string, any>>({});
   const lastSyncedElementOrderSigRef = useRef<string>("");
@@ -240,6 +264,8 @@ export const Editor: React.FC = () => {
   const pendingRemoteElementOrderRef = useRef<string[] | null>(null);
   const remoteFlushScheduledRef = useRef(false);
   const remoteFlushRafIdRef = useRef<number | null>(null);
+  /** Map of fileId → Promise<accessUrl> for in-flight S3 uploads. */
+  const pendingS3UploadsRef = useRef<Record<string, Promise<string>>>({});
 
   useEffect(() => {
     setAutoHideEnabled(getStoredAutoHideEnabled());
@@ -762,6 +788,44 @@ export const Editor: React.FC = () => {
 
         if (isSyncing.current) return;
 
+        // For any newly-added files that still carry raw base64, kick off an
+        // async S3 upload so the *next* DB save persists the S3 URL instead.
+        for (const file of normalizedFiles) {
+          const fid: string | undefined = file?.id;
+          if (
+            fid &&
+            typeof file?.dataURL === "string" &&
+            file.dataURL.startsWith("data:") &&
+            !pendingS3UploadsRef.current[fid]
+          ) {
+            // We don't have the original File object at this point (Excalidraw
+            // gives us the already-decoded data URL), so we re-encode it as a
+            // Blob and upload that.  This path is only taken for paste/library
+            // images; drag-drop goes through handleCanvasDropCapture which
+            // uploads the raw File before calling addFiles.
+            const blob = dataURLToBlob(file.dataURL);
+            if (blob) {
+              const uploadPromise = (async () => {
+                const fileObj = new File([blob], `${fid}.${blob.type.split("/")[1] || "png"}`, { type: blob.type });
+                const accessUrl = await tryUploadFileToS3Ref.current?.(fid, fileObj) ?? null;
+                if (accessUrl) {
+                  // Replace the base64 in our local ref so the save picks it up.
+                  if (latestFilesRef.current?.[fid]) {
+                    latestFilesRef.current = {
+                      ...latestFilesRef.current,
+                      [fid]: { ...latestFilesRef.current[fid], dataURL: accessUrl },
+                    };
+                  }
+                  return accessUrl;
+                }
+                // Upload failed — keep the base64.
+                return file.dataURL as string;
+              })();
+              pendingS3UploadsRef.current[fid] = uploadPromise;
+            }
+          }
+        }
+
         const nextFiles = api.getFiles?.() || {};
         const didEmit = emitFilesDeltaIfNeeded(nextFiles);
 
@@ -868,6 +932,35 @@ export const Editor: React.FC = () => {
     scrollToContent: true,
   }), []);
 
+  /**
+   * Attempt to upload a single image File to S3.
+   * Returns the S3 access URL on success, or null when S3 is not configured or
+   * the upload fails (caller should fall back to the base64 data URL).
+   */
+  const tryUploadFileToS3 = useCallback(
+    async (fileId: string, file: File): Promise<string | null> => {
+      try {
+        const s3Available = await api.isS3Enabled();
+        if (!s3Available) return null;
+
+        const { uploadUrl, accessUrl } = await api.getS3UploadUrl(
+          fileId,
+          file.type || "image/png",
+          file.size
+        );
+
+        await api.uploadFileToS3(uploadUrl, file);
+        return accessUrl;
+      } catch (err) {
+        console.warn("[Editor] S3 upload failed, falling back to base64", err);
+        return null;
+      }
+    },
+    []
+  );
+  // Keep the ref in sync so the addFiles patch can always call the latest version.
+  tryUploadFileToS3Ref.current = tryUploadFileToS3;
+
   const saveDataRef = useRef<((drawingId: string, elements: readonly any[], appState: any, files?: Record<string, any>) => Promise<void>) | null>(null);
   const savePreviewRef = useRef<((drawingId: string, elements: readonly any[], appState: any, files: any) => Promise<void>) | null>(null);
   const saveLibraryRef = useRef<((items: any[]) => Promise<void>) | null>(null);
@@ -904,7 +997,34 @@ export const Editor: React.FC = () => {
         });
         return;
       }
-      const persistableFiles = files ?? latestFilesRef.current ?? {};
+      let persistableFiles: Record<string, any> = files ?? latestFilesRef.current ?? {};
+
+      // Wait for any in-flight S3 uploads that still have base64 dataURLs,
+      // then replace the base64 with the resolved S3 URL before persisting.
+      const pendingUploads = pendingS3UploadsRef.current;
+      const pendingIds = Object.keys(pendingUploads).filter(
+        (fid) => typeof persistableFiles[fid]?.dataURL === "string" &&
+                 persistableFiles[fid].dataURL.startsWith("data:")
+      );
+      if (pendingIds.length > 0) {
+        const results = await Promise.allSettled(
+          pendingIds.map((fid) =>
+            pendingUploads[fid].then((url) => ({ fid, url }))
+          )
+        );
+        const updated = { ...persistableFiles };
+        for (const result of results) {
+          if (result.status === "fulfilled") {
+            const { fid, url } = result.value;
+            updated[fid] = { ...updated[fid], dataURL: url };
+            delete pendingS3UploadsRef.current[fid];
+          }
+        }
+        persistableFiles = updated;
+        // Keep latestFilesRef in sync so the next save uses the S3 URLs too.
+        latestFilesRef.current = persistableFiles;
+      }
+
       const filesChangedSincePersist =
         Object.keys(getFilesDelta(lastPersistedFilesRef.current || {}, persistableFiles || {}))
           .length > 0;
@@ -1508,15 +1628,35 @@ export const Editor: React.FC = () => {
           appState
         );
 
+        // Load image data (base64 + dimensions) for all dropped files.
         const loadedImages = await Promise.all(droppedImages.map(loadDroppedImageData));
         if (loadedImages.length === 0) return;
 
-        const fileRecords = loadedImages.map(({ fileId, mimeType, dataURL, created }) => ({
-          id: fileId,
-          mimeType,
-          dataURL,
-          created,
-        }));
+        // Attempt to upload each image to S3.  On success, replace the base64
+        // dataURL with the S3 access URL; on failure, keep the base64 so the
+        // image still works (graceful degradation).
+        const uploadResults = await Promise.allSettled(
+          loadedImages.map((img, i) =>
+            tryUploadFileToS3(img.fileId, droppedImages[i]).then((url) => ({
+              fileId: img.fileId,
+              url,
+            }))
+          )
+        );
+
+        const fileRecords = loadedImages.map(({ fileId, mimeType, dataURL, created }, i) => {
+          const result = uploadResults[i];
+          const s3Url =
+            result.status === "fulfilled" && result.value.url
+              ? result.value.url
+              : null;
+          return {
+            id: fileId,
+            mimeType,
+            dataURL: s3Url ?? dataURL,
+            created,
+          };
+        });
 
         let nextY = dropPoint.y;
         const imageElements = convertToExcalidrawElements(
@@ -1555,7 +1695,7 @@ export const Editor: React.FC = () => {
         toast.error("Failed to import dropped images");
       }
     },
-    [canEdit]
+    [canEdit, tryUploadFileToS3]
   );
 
   useEffect(() => {
