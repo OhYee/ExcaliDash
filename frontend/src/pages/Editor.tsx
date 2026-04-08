@@ -814,30 +814,28 @@ export const Editor: React.FC = () => {
                   { type: blob.type }
                 );
                 const currentDrawingId = id;
-                if (!currentDrawingId) return file.dataURL as string;
+                if (!currentDrawingId) throw new Error("No drawing ID available for S3 upload");
                 const accessUrl = await tryUploadFileToS3Ref.current?.(fid, currentDrawingId, fileObj) ?? null;
-                if (accessUrl) {
-                  // Replace the base64 in our local ref so the save picks it up.
-                  if (latestFilesRef.current?.[fid]) {
-                    latestFilesRef.current = {
-                      ...latestFilesRef.current,
-                      [fid]: { ...latestFilesRef.current[fid], dataURL: accessUrl },
-                    };
-                  }
-                  // Broadcast the S3 URL to other clients.
-                  broadcastChanges(
-                    latestElementsRef.current,
-                    latestFilesRef.current
-                  );
-                  return accessUrl;
+                if (!accessUrl) {
+                  // S3 not configured — not an error.
+                  return file.dataURL as string;
                 }
-                // Upload failed — broadcast the base64 as fallback.
+                if (latestFilesRef.current?.[fid]) {
+                  latestFilesRef.current = {
+                    ...latestFilesRef.current,
+                    [fid]: { ...latestFilesRef.current[fid], dataURL: accessUrl },
+                  };
+                }
                 broadcastChanges(
                   latestElementsRef.current,
                   latestFilesRef.current
                 );
-                return file.dataURL as string;
-              })();
+                return accessUrl;
+              })().catch((err) => {
+                console.error("[Editor] S3 upload failed", err);
+                toast.error(`Image upload failed: ${err instanceof Error ? err.message : "unknown error"}`);
+                throw err;
+              });
               pendingS3UploadsRef.current[fid] = uploadPromise;
             }
           }
@@ -951,28 +949,23 @@ export const Editor: React.FC = () => {
 
   /**
    * Attempt to upload a single image File to S3.
-   * Returns the S3 access URL on success, or null when S3 is not configured or
-   * the upload fails (caller should fall back to the base64 data URL).
+   * Returns the S3 access URL on success, or null when S3 is not configured.
+   * Throws when S3 is enabled but the upload fails — callers must handle the error.
    */
   const tryUploadFileToS3 = useCallback(
     async (fileId: string, drawingId: string, file: File): Promise<string | null> => {
-      try {
-        const s3Available = await api.isS3Enabled();
-        if (!s3Available) return null;
+      const s3Available = await api.isS3Enabled();
+      if (!s3Available) return null;
 
-        const { uploadUrl, accessUrl } = await api.getS3UploadUrl(
-          fileId,
-          drawingId,
-          file.type || "image/png",
-          file.size
-        );
+      const { uploadUrl, accessUrl } = await api.getS3UploadUrl(
+        fileId,
+        drawingId,
+        file.type || "image/png",
+        file.size
+      );
 
-        await api.uploadFileToS3(uploadUrl, file);
-        return accessUrl;
-      } catch (err) {
-        console.warn("[Editor] S3 upload failed, falling back to base64", err);
-        return null;
-      }
+      await api.uploadFileToS3(uploadUrl, file);
+      return accessUrl;
     },
     []
   );
@@ -1658,24 +1651,29 @@ export const Editor: React.FC = () => {
               { type: blob.type }
             );
             const currentDrawingId = id;
-            if (!currentDrawingId) return (file as any).dataURL as string;
+            if (!currentDrawingId) throw new Error("No drawing ID available for S3 upload");
             const accessUrl = await tryUploadFileToS3Ref.current?.(fid, currentDrawingId, fileObj) ?? null;
-            if (accessUrl) {
-              if (latestFilesRef.current?.[fid]) {
-                latestFilesRef.current = {
-                  ...latestFilesRef.current,
-                  [fid]: { ...latestFilesRef.current[fid], dataURL: accessUrl },
-                };
-              }
-              // Broadcast the S3 URL to other clients now that the upload is done.
-              broadcastChanges(
-                latestElementsRef.current,
-                latestFilesRef.current
-              );
-              return accessUrl;
+            if (!accessUrl) {
+              // S3 not configured — not an error.
+              return (file as any).dataURL as string;
             }
-            return (file as any).dataURL as string;
-          })();
+            if (latestFilesRef.current?.[fid]) {
+              latestFilesRef.current = {
+                ...latestFilesRef.current,
+                [fid]: { ...latestFilesRef.current[fid], dataURL: accessUrl },
+              };
+            }
+            // Broadcast the S3 URL to other clients now that the upload is done.
+            broadcastChanges(
+              latestElementsRef.current,
+              latestFilesRef.current
+            );
+            return accessUrl;
+          })().catch((err) => {
+            console.error("[Editor] S3 upload failed", err);
+            toast.error(`Image upload failed: ${err instanceof Error ? err.message : "unknown error"}`);
+            throw err;
+          });
           pendingS3UploadsRef.current[fid] = uploadPromise;
         }
       }
@@ -1711,9 +1709,8 @@ export const Editor: React.FC = () => {
         const loadedImages = await Promise.all(droppedImages.map(loadDroppedImageData));
         if (loadedImages.length === 0) return;
 
-        // Attempt to upload each image to S3.  On success, replace the base64
-        // dataURL with the S3 access URL; on failure, keep the base64 so the
-        // image still works (graceful degradation).
+        // Attempt to upload each image to S3.  When S3 is enabled, upload
+        // failures are surfaced as errors — no silent base64 fallback.
         const uploadResults = await Promise.allSettled(
           loadedImages.map((img, i) =>
             tryUploadFileToS3(img.fileId, id!, droppedImages[i]).then((url) => ({
@@ -1723,12 +1720,22 @@ export const Editor: React.FC = () => {
           )
         );
 
+        const failedUploads = uploadResults.filter((r) => r.status === "rejected");
+        if (failedUploads.length > 0) {
+          const firstErr = (failedUploads[0] as PromiseRejectedResult).reason;
+          console.error("[Editor] S3 upload failed for dropped images", firstErr);
+          toast.error(`Image upload failed: ${firstErr instanceof Error ? firstErr.message : "unknown error"}`);
+        }
+
         const fileRecords = loadedImages.map(({ fileId, mimeType, dataURL, created }, i) => {
           const result = uploadResults[i];
           const s3Url =
             result.status === "fulfilled" && result.value.url
               ? result.value.url
               : null;
+          // When S3 is enabled but upload failed, s3Url is null and we still
+          // use the base64 locally so the image renders on *this* client.
+          // The error toast above already informed the user.
           return {
             id: fileId,
             mimeType,
