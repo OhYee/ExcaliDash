@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { ArrowLeft, Download, Loader2, ChevronUp, ChevronDown, Share2 } from 'lucide-react';
+import { ArrowLeft, Download, Loader2, ChevronUp, ChevronDown, Share2, Scissors } from 'lucide-react';
 import clsx from 'clsx';
 import {
   Excalidraw,
@@ -35,6 +35,7 @@ import type { ElementVersionInfo } from './editor/shared';
 import { useEditorChrome } from './editor/useEditorChrome';
 import { useEditorIdentity } from './editor/useEditorIdentity';
 import { ShareModal } from '../components/ShareModal';
+import { ConfirmModal } from '../components/ConfirmModal';
 
 interface Peer extends UserIdentity {
   isActive: boolean;
@@ -188,6 +189,7 @@ export const Editor: React.FC = () => {
   const [isSavingOnLeave, setIsSavingOnLeave] = useState(false);
   const [autoHideEnabled, setAutoHideEnabled] = useState(getStoredAutoHideEnabled);
   const [isShareOpen, setIsShareOpen] = useState(false);
+  const [isTrimHistoryOpen, setIsTrimHistoryOpen] = useState(false);
   const [langCode, setLangCode] = useState(getInitialLangCode);
   const { isHeaderVisible, setIsHeaderVisible } = useEditorChrome({
     drawingName,
@@ -1670,6 +1672,33 @@ export const Editor: React.FC = () => {
     }
   };
 
+  const handleTrimHistory = useCallback(async () => {
+    if (!excalidrawAPI.current || !id) return;
+    const allElements = excalidrawAPI.current.getSceneElementsIncludingDeleted();
+    const trimmedElements = allElements.filter((el: any) => !el.isDeleted);
+    const appState = excalidrawAPI.current.getAppState();
+    const files = excalidrawAPI.current.getFiles() || {};
+
+    excalidrawAPI.current.updateScene({
+      elements: trimmedElements,
+      captureHistory: false,
+    } as any);
+
+    latestElementsRef.current = trimmedElements;
+    lastPersistedElementsRef.current = trimmedElements;
+
+    try {
+      await enqueueSceneSave(id, trimmedElements, appState, files, { suppressErrors: false });
+      if (savePreviewRef.current) {
+        savePreviewRef.current(id, trimmedElements, appState, files);
+      }
+      toast.success('History trimmed successfully');
+    } catch {
+      toast.error('Failed to save after trimming history');
+    }
+    setIsTrimHistoryOpen(false);
+  }, [id, enqueueSceneSave]);
+
   return (
     <div className="h-screen flex flex-col bg-white dark:bg-neutral-950 overflow-hidden">
       <header 
@@ -1750,6 +1779,16 @@ export const Editor: React.FC = () => {
           </button>
 
           <div className="h-6 w-px bg-gray-300 dark:bg-gray-700" />
+
+          {canEdit ? (
+            <button
+              onClick={() => setIsTrimHistoryOpen(true)}
+              className="p-2 hover:bg-gray-100 dark:hover:bg-neutral-800 rounded-lg text-gray-600 dark:text-gray-300 transition-colors"
+              title="Trim deleted elements from history"
+            >
+              <Scissors size={20} />
+            </button>
+          ) : null}
 
           <button
             onClick={() => {
@@ -1874,6 +1913,29 @@ export const Editor: React.FC = () => {
           onClose={() => setIsShareOpen(false)}
         />
       ) : null}
+
+      <ConfirmModal
+        isOpen={isTrimHistoryOpen}
+        title="Trim History"
+        message={(() => {
+          if (!excalidrawAPI.current) return "Remove all deleted elements from storage, keeping only visible content.";
+          const all = excalidrawAPI.current.getSceneElementsIncludingDeleted();
+          const deletedCount = all.filter((el: any) => el.isDeleted).length;
+          return (
+            <span>
+              This will permanently remove <strong>{deletedCount}</strong> deleted element{deletedCount !== 1 ? 's' : ''} from storage.
+              Only the <strong>{all.length - deletedCount}</strong> visible element{all.length - deletedCount !== 1 ? 's' : ''} will be kept.
+              <br /><br />
+              Undo history will be cleared on the next page load. If others are collaborating on this drawing, they may see a brief flicker.
+            </span>
+          );
+        })()}
+        confirmText="Trim History"
+        cancelText="Cancel"
+        onConfirm={handleTrimHistory}
+        onCancel={() => setIsTrimHistoryOpen(false)}
+        isDangerous
+      />
     </div>
   );
 };
