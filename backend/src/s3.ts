@@ -17,6 +17,8 @@ export interface S3Config {
   endpoint?: string;
   /** Optional public base URL for public-read buckets or CDN (e.g. https://cdn.example.com) */
   publicUrl?: string;
+  /** Force path-style addressing (required for MinIO, must be false for Alibaba Cloud OSS) */
+  forcePathStyle?: boolean;
   accessKeyId?: string;
   secretAccessKey?: string;
 }
@@ -36,8 +38,9 @@ export const initS3 = (cfg: S3Config): void => {
 
   if (cfg.endpoint) {
     clientConfig.endpoint = cfg.endpoint;
-    // Path-style addressing is required for MinIO and some S3-compatible services.
-    clientConfig.forcePathStyle = true;
+    // Path-style is required for MinIO but must be false for services like
+    // Alibaba Cloud OSS that use virtual-hosted-style URLs.
+    clientConfig.forcePathStyle = cfg.forcePathStyle ?? false;
   }
 
   if (cfg.accessKeyId && cfg.secretAccessKey) {

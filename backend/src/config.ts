@@ -12,6 +12,7 @@ interface S3Config {
   region: string;
   endpoint: string | null;
   publicUrl: string | null;
+  forcePathStyle: boolean;
   accessKeyId: string | null;
   secretAccessKey: string | null;
 }
@@ -243,6 +244,7 @@ const resolveS3Config = (): S3Config => ({
   region: getOptionalEnv("S3_REGION", "us-east-1"),
   endpoint: getOptionalTrimmedEnv("S3_ENDPOINT"),
   publicUrl: getOptionalTrimmedEnv("S3_PUBLIC_URL"),
+  forcePathStyle: getOptionalEnv("S3_FORCE_PATH_STYLE", "false").toLowerCase() === "true",
   accessKeyId: getOptionalTrimmedEnv("AWS_ACCESS_KEY_ID"),
   secretAccessKey: getOptionalTrimmedEnv("AWS_SECRET_ACCESS_KEY"),
 });

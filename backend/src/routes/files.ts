@@ -14,7 +14,7 @@ import {
   getPublicUrl,
 } from "../s3";
 
-const FILE_KEY_PREFIX = "excalidash";
+const FILE_KEY_PREFIX = process.env.S3_KEY_PREFIX?.replace(/\/+$/, "") || "excalidash";
 const UPLOAD_EXPIRES_IN = 300;    // 5 minutes – enough for a browser PUT
 const DOWNLOAD_EXPIRES_IN = 3600; // 1 hour   – cached by browser
 
