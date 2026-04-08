@@ -824,9 +824,18 @@ export const Editor: React.FC = () => {
                       [fid]: { ...latestFilesRef.current[fid], dataURL: accessUrl },
                     };
                   }
+                  // Broadcast the S3 URL to other clients.
+                  broadcastChanges(
+                    latestElementsRef.current,
+                    latestFilesRef.current
+                  );
                   return accessUrl;
                 }
-                // Upload failed — keep the base64.
+                // Upload failed — broadcast the base64 as fallback.
+                broadcastChanges(
+                  latestElementsRef.current,
+                  latestFilesRef.current
+                );
                 return file.dataURL as string;
               })();
               pendingS3UploadsRef.current[fid] = uploadPromise;
@@ -1284,14 +1293,31 @@ export const Editor: React.FC = () => {
         }
       });
 
-      const filesDelta = getFilesDelta(lastSyncedFilesRef.current, nextFiles);
+      const rawFilesDelta = getFilesDelta(lastSyncedFilesRef.current, nextFiles);
+      // Don't broadcast base64 files that have a pending S3 upload — wait for
+      // the upload to finish so other clients receive the lightweight S3 URL
+      // instead of the full base64 payload.
+      const filesDelta: Record<string, any> = {};
+      for (const [fid, file] of Object.entries(rawFilesDelta)) {
+        const isPendingUpload =
+          !!pendingS3UploadsRef.current[fid] &&
+          typeof file?.dataURL === "string" &&
+          file.dataURL.startsWith("data:");
+        if (!isPendingUpload) {
+          filesDelta[fid] = file;
+        }
+      }
       const shouldSyncFiles = Object.keys(filesDelta).length > 0;
 
       if (Object.keys(nextFiles || {}).length > 0) {
         latestFilesRef.current = nextFiles;
       }
       if (shouldSyncFiles) {
-        lastSyncedFilesRef.current = nextFiles;
+        // Only mark as synced the files we actually broadcast.
+        lastSyncedFilesRef.current = {
+          ...lastSyncedFilesRef.current,
+          ...filesDelta,
+        };
       }
 
       if (changes.length > 0 || shouldSyncFiles || shouldSyncOrder) {
@@ -1641,6 +1667,11 @@ export const Editor: React.FC = () => {
                   [fid]: { ...latestFilesRef.current[fid], dataURL: accessUrl },
                 };
               }
+              // Broadcast the S3 URL to other clients now that the upload is done.
+              broadcastChanges(
+                latestElementsRef.current,
+                latestFilesRef.current
+              );
               return accessUrl;
             }
             return (file as any).dataURL as string;
