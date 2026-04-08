@@ -79,6 +79,9 @@ export const generatePresignedUploadUrl = async (
     Bucket: s3Config.bucket,
     Key: key,
     ContentType: mimeType,
+    // Image keys contain a content hash, so they are immutable — cache
+    // aggressively to reduce repeated downloads from S3/CDN.
+    CacheControl: "public, max-age=31536000, immutable",
   });
 
   return getSignedUrl(s3Client, command, { expiresIn: expiresInSeconds });
@@ -100,6 +103,7 @@ export const generatePresignedDownloadUrl = async (
   const command = new GetObjectCommand({
     Bucket: s3Config.bucket,
     Key: key,
+    ResponseCacheControl: "public, max-age=31536000, immutable",
   });
 
   return getSignedUrl(s3Client, command, { expiresIn: expiresInSeconds });
