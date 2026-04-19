@@ -4,6 +4,7 @@ import { ArrowLeft, Download, Loader2, ChevronUp, ChevronDown, Share2 } from 'lu
 import clsx from 'clsx';
 import {
   Excalidraw,
+  CaptureUpdateAction,
   convertToExcalidrawElements,
   exportToSvg,
   viewportCoordsToSceneCoords,
@@ -1585,7 +1586,7 @@ export const Editor: React.FC = () => {
               imageElements.map((element: any) => [element.id, true])
             ),
           },
-          commitToHistory: true,
+          captureUpdate: CaptureUpdateAction.IMMEDIATELY,
         });
       } catch (err) {
         console.error("[Editor] Failed to import dropped images", err);

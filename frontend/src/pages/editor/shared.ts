@@ -7,19 +7,26 @@ export interface ElementVersionInfo {
   contentSig: string;
 }
 
+/**
+ * Matches CaptureUpdateAction.NEVER from @excalidraw/excalidraw.
+ * Kept as a local constant so that shared.ts doesn't pull in the full
+ * excalidraw UI bundle, which breaks jsdom-based unit tests.
+ */
+const CAPTURE_UPDATE_NEVER = "NEVER" as const;
+
 type RemoteSceneUpdate =
   | {
       collaborators: Map<string, any>;
-      commitToHistory: false;
+      captureUpdate: typeof CAPTURE_UPDATE_NEVER;
     }
   | {
       elements: any[];
       files?: Record<string, any>;
-      commitToHistory: false;
+      captureUpdate: typeof CAPTURE_UPDATE_NEVER;
     }
   | {
       files: Record<string, any>;
-      commitToHistory: false;
+      captureUpdate: typeof CAPTURE_UPDATE_NEVER;
     };
 
 type BuildRemoteSceneUpdateInput = {
@@ -53,7 +60,7 @@ export const buildRemoteSceneUpdate = ({
     return {
       sceneUpdate: {
         collaborators,
-        commitToHistory: false,
+        captureUpdate: CAPTURE_UPDATE_NEVER,
       },
       mergedElements: null,
       nextFiles: lastSyncedFiles,
@@ -78,7 +85,7 @@ export const buildRemoteSceneUpdate = ({
       sceneUpdate: {
         elements: mergedElements,
         ...(shouldUpdateFiles ? { files: nextFiles } : {}),
-        commitToHistory: false,
+        captureUpdate: CAPTURE_UPDATE_NEVER,
       },
       mergedElements,
       nextFiles,
@@ -90,7 +97,7 @@ export const buildRemoteSceneUpdate = ({
     return {
       sceneUpdate: {
         files: nextFiles,
-        commitToHistory: false,
+        captureUpdate: CAPTURE_UPDATE_NEVER,
       },
       mergedElements: null,
       nextFiles,
