@@ -5,10 +5,12 @@ import clsx from 'clsx';
 import {
   Excalidraw,
   CaptureUpdateAction,
+  MainMenu,
   convertToExcalidrawElements,
   exportToSvg,
   viewportCoordsToSceneCoords,
 } from '@excalidraw/excalidraw';
+import { getInitialLangCode, LanguageSelector } from '../components/LanguageSelector';
 import debounce from 'lodash/debounce';
 import throttle from 'lodash/throttle';
 import { Toaster, toast } from 'sonner';
@@ -207,6 +209,7 @@ export const Editor: React.FC = () => {
   const [isSavingOnLeave, setIsSavingOnLeave] = useState(false);
   const [autoHideEnabled, setAutoHideEnabled] = useState(getStoredAutoHideEnabled);
   const [isShareOpen, setIsShareOpen] = useState(false);
+  const [langCode, setLangCode] = useState(getInitialLangCode);
   const { isHeaderVisible, setIsHeaderVisible } = useEditorChrome({
     drawingName,
     autoHideEnabled,
@@ -1873,6 +1876,7 @@ export const Editor: React.FC = () => {
           <Excalidraw
             key={id}
             theme={theme === 'dark' ? 'dark' : 'light'}
+            langCode={langCode}
             initialData={initialData}
             onChange={handleCanvasChange}
             onPointerUpdate={onPointerUpdate}
@@ -1880,7 +1884,19 @@ export const Editor: React.FC = () => {
             excalidrawAPI={setExcalidrawAPI}
             UIOptions={UIOptions}
             viewModeEnabled={!canEdit}
-          />
+          >
+            <MainMenu>
+              <MainMenu.DefaultItems.ToggleTheme />
+              <MainMenu.DefaultItems.SaveAsImage />
+              <MainMenu.DefaultItems.ClearCanvas />
+              <MainMenu.DefaultItems.ChangeCanvasBackground />
+              <MainMenu.DefaultItems.Help />
+              <MainMenu.Separator />
+              <MainMenu.ItemCustom>
+                <LanguageSelector langCode={langCode} onChange={setLangCode} />
+              </MainMenu.ItemCustom>
+            </MainMenu>
+          </Excalidraw>
         ) : (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-gray-500 dark:text-gray-400">
             <span className="text-sm font-medium">
