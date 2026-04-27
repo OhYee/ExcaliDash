@@ -38,10 +38,15 @@ type BuildRemoteSceneUpdateInput = {
   incomingFiles?: Record<string, any>;
 };
 
-export const getPersistedAppState = (appState: Record<string, any> | null | undefined) => ({
-  viewBackgroundColor: appState?.viewBackgroundColor ?? "#ffffff",
-  gridSize: appState?.gridSize ?? null,
-});
+export const getPersistedAppState = (appState: Record<string, any> | null | undefined) => {
+  const base: Record<string, any> = {
+    viewBackgroundColor: appState?.viewBackgroundColor ?? "#ffffff",
+    gridSize: appState?.gridSize ?? null,
+  };
+  if (appState?.gridStep != null) base.gridStep = appState.gridStep;
+  if (appState?.gridModeEnabled != null) base.gridModeEnabled = appState.gridModeEnabled;
+  return base;
+};
 
 export const buildRemoteSceneUpdate = ({
   collaborators,

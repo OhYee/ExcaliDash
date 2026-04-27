@@ -157,6 +157,8 @@ describe("editor/shared scene guards", () => {
       getPersistedAppState({
         viewBackgroundColor: "#123456",
         gridSize: 24,
+        gridStep: 5,
+        gridModeEnabled: true,
         cursorButton: "down",
         activeTool: { type: "hand", locked: false, lastActiveTool: null },
         selectedElementIds: { a: true },
@@ -169,6 +171,8 @@ describe("editor/shared scene guards", () => {
     ).toEqual({
       viewBackgroundColor: "#123456",
       gridSize: 24,
+      gridStep: 5,
+      gridModeEnabled: true,
     });
   });
 
