@@ -326,8 +326,8 @@ export const registerStorageRoutes = (
         });
       }
 
-      const deleted: string[] = [];
-      const errors: Array<{ fileId: string; error: string }> = [];
+      let deletedCount = 0;
+      let errorCount = 0;
 
       for (const fileId of fileIds as string[]) {
         try {
@@ -345,28 +345,41 @@ export const registerStorageRoutes = (
           // Remove from drawing.files JSON
           delete files[fileId];
 
-          deleted.push(fileId);
+          deletedCount++;
         } catch (err: any) {
           console.error(
             `[storage/orphans] Failed to delete fileId=${fileId}`,
             err
           );
-          errors.push({
-            fileId,
-            error: err?.message ?? "Unknown error",
-          });
+          errorCount++;
         }
       }
 
-      // Update drawing with cleaned files
+      // Also remove deleted elements that reference the orphaned files,
+      // so the files disappear from the diff completely.
+      const deletedFileIdSet = new Set(fileIds as string[]);
+      const cleanedElements = elements.filter((el: any) => {
+        if (
+          el.isDeleted &&
+          el.type === "image" &&
+          typeof el.fileId === "string" &&
+          deletedFileIdSet.has(el.fileId)
+        ) {
+          return false; // remove this deleted element
+        }
+        return true;
+      });
+
+      // Update drawing with cleaned files and elements
       await prisma.drawing.update({
         where: { id },
         data: {
           files: JSON.stringify(files),
+          elements: JSON.stringify(cleanedElements),
         },
       });
 
-      return res.json({ deleted, errors });
+      return res.json({ deleted: deletedCount, errors: errorCount });
     })
   );
 };
