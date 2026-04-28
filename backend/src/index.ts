@@ -679,24 +679,26 @@ setInterval(async () => {
 }, 60 * 60 * 1000);
 
 if (isMain) {
-  httpServer.listen(PORT, async () => {
-    // Apply SQLite PRAGMAs (WAL, busy_timeout) before serving requests so
-    // every connection benefits, not just those created after the first
-    // background-applied PRAGMA.
+  // Apply SQLite PRAGMAs (WAL, busy_timeout) BEFORE listen() returns so the
+  // very first request can't race a still-pending journal-mode change.
+  // listen()'s callback fires after the socket is open, which is too late.
+  void (async () => {
     await configureSqlite();
-    await initializeUploadDir();
-    try {
-      await issueBootstrapSetupCodeIfRequired({
-        prisma,
-        ttlMs: config.bootstrapSetupCodeTtlMs,
-        authMode: config.authMode,
-        reason: "startup",
-      });
-    } catch (error) {
-      console.error("Failed to issue bootstrap setup code:", error);
-    }
-    console.log(`Server running on port ${PORT}`);
-    console.log(`Environment: ${config.nodeEnv}`);
-    console.log(`Frontend URL: ${config.frontendUrl}`);
-  });
+    httpServer.listen(PORT, async () => {
+      await initializeUploadDir();
+      try {
+        await issueBootstrapSetupCodeIfRequired({
+          prisma,
+          ttlMs: config.bootstrapSetupCodeTtlMs,
+          authMode: config.authMode,
+          reason: "startup",
+        });
+      } catch (error) {
+        console.error("Failed to issue bootstrap setup code:", error);
+      }
+      console.log(`Server running on port ${PORT}`);
+      console.log(`Environment: ${config.nodeEnv}`);
+      console.log(`Frontend URL: ${config.frontendUrl}`);
+    });
+  })();
 }
