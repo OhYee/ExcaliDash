@@ -321,8 +321,12 @@ describe("Storage management routes", () => {
         .set("Authorization", `Bearer ${ownerToken}`);
 
       expect(res.status).toBe(200);
+      // totalCanvasRefs counts every canvas-referenced fileId (active +
+      // soft-deleted), so file-a (active) and file-b (deleted) both
+      // contribute. activeCanvasRefs in the per-row payload below is
+      // what restricts to non-deleted refs.
       expect(res.body.summary).toMatchObject({
-        totalCanvasRefs: 2, // active only
+        totalCanvasRefs: 2,
         totalSqliteFiles: 3,
       });
 

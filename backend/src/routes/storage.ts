@@ -317,11 +317,27 @@ export const registerStorageRoutes = (
       if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
       const { id } = req.params;
-      const { confirmName, fileIds } = req.body ?? {};
+      const { confirmName, fileIds: rawFileIds } = req.body ?? {};
 
-      if (!Array.isArray(fileIds) || fileIds.length === 0) {
+      if (!Array.isArray(rawFileIds) || rawFileIds.length === 0) {
         return res.status(400).json({ error: "fileIds must be a non-empty array" });
       }
+
+      // Validate every entry: same regex as the rest of the codebase
+      // (security.ts sanitiser, /files/:fileId route, processFilesForS3).
+      // Without this, a non-string or path-traversal-shaped id would
+      // explode inside the Prisma / S3 calls below.
+      const VALID_FILE_ID = /^[\w-]{1,200}$/;
+      const invalidIds = rawFileIds.filter(
+        (fid) => typeof fid !== "string" || !VALID_FILE_ID.test(fid),
+      );
+      if (invalidIds.length > 0) {
+        return res.status(400).json({
+          error: "fileIds contains invalid entries",
+          invalidFileIds: invalidIds,
+        });
+      }
+      const fileIds = rawFileIds as string[];
 
       const drawing = await prisma.drawing.findFirst({
         where: { id, userId },
@@ -341,9 +357,7 @@ export const registerStorageRoutes = (
 
       // Safety: reject if any fileId is still referenced by a non-deleted element
       const activeRefs = collectReferencedFileIds(elements, false);
-      const blockedIds = (fileIds as string[]).filter((fid) =>
-        activeRefs.has(fid)
-      );
+      const blockedIds = fileIds.filter((fid) => activeRefs.has(fid));
       if (blockedIds.length > 0) {
         return res.status(400).json({
           error: "Cannot delete files referenced by active elements",
@@ -351,36 +365,53 @@ export const registerStorageRoutes = (
         });
       }
 
-      let deletedCount = 0;
-      let errorCount = 0;
+      // Batched S3 + DB cleanup. S3File rows are scoped
+      // (drawingId, fileId), and each drawing has its own S3 object
+      // under its own prefix path — deletion here cannot strand a
+      // sibling drawing. Doing N+1 sequential lookups + deletes per
+      // file would tie up the request unnecessarily for large
+      // selections.
+      let s3ObjectsDeleted = 0;
+      let s3DeleteErrors = 0;
 
-      // S3File rows are scoped (drawingId, fileId), and each drawing
-      // has its own S3 object under its own prefix path — deleting
-      // here cannot strand a sibling drawing.
-      for (const fileId of fileIds as string[]) {
-        try {
-          if (isS3Enabled()) {
-            const s3Record = await prisma.s3File.findUnique({
-              where: { drawingId_fileId: { drawingId: id, fileId } },
-            });
-            if (s3Record) {
-              await deleteS3Object(s3Record.s3Key);
-              await prisma.s3File.delete({
-                where: { drawingId_fileId: { drawingId: id, fileId } },
-              });
+      if (isS3Enabled()) {
+        const s3Records = await prisma.s3File.findMany({
+          where: { drawingId: id, fileId: { in: fileIds } },
+        });
+
+        const S3_DELETE_CONCURRENCY = 8;
+        for (let i = 0; i < s3Records.length; i += S3_DELETE_CONCURRENCY) {
+          const batch = s3Records.slice(i, i + S3_DELETE_CONCURRENCY);
+          const results = await Promise.allSettled(
+            batch.map((rec) => deleteS3Object(rec.s3Key)),
+          );
+          for (let j = 0; j < results.length; j++) {
+            const result = results[j];
+            if (result.status === "fulfilled") {
+              s3ObjectsDeleted++;
+            } else {
+              console.error(
+                `[storage/orphans] Failed to delete S3 object: ${batch[j].s3Key}`,
+                result.reason,
+              );
+              s3DeleteErrors++;
             }
           }
-
-          delete files[fileId];
-          deletedCount++;
-        } catch (err: any) {
-          console.error(
-            `[storage/orphans] Failed to delete fileId=${fileId}`,
-            err
-          );
-          errorCount++;
         }
+
+        await prisma.s3File.deleteMany({
+          where: { drawingId: id, fileId: { in: fileIds } },
+        });
       }
+
+      // Update the drawing's files JSON regardless of S3 outcomes —
+      // the JSON entry is what the editor reads, and once trimmed it
+      // can't be restored from the bucket alone.
+      for (const fileId of fileIds) {
+        delete files[fileId];
+      }
+      const deletedCount = fileIds.length;
+      const errorCount = s3DeleteErrors;
 
       // Also remove deleted elements that reference the orphaned files,
       // so the files disappear from the diff completely.
