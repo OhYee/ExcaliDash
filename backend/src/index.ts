@@ -28,7 +28,9 @@ import { logAuditEvent } from "./utils/audit";
 import { registerDashboardRoutes } from "./routes/dashboard";
 import { registerImportExportRoutes } from "./routes/importExport";
 import { registerSystemRoutes } from "./routes/system";
-import { prisma } from "./db/prisma";
+import { registerFileRoutes } from "./routes/files";
+import { registerStorageRoutes } from "./routes/storage";
+import { prisma, configureSqlite } from "./db/prisma";
 import { createDrawingsCacheStore } from "./server/drawingsCache";
 import { registerCsrfProtection } from "./server/csrf";
 import { registerSocketHandlers } from "./server/socket";
@@ -37,6 +39,8 @@ import {
   getHttpsRedirectUrl,
 } from "./server/httpsRedirectPolicy";
 import { issueBootstrapSetupCodeIfRequired } from "./auth/bootstrapSetupCode";
+import { initS3 } from "./s3";
+import { processFilesForS3 } from "./fileProcessing";
 
 const backendRoot = path.resolve(__dirname, "../");
 console.log("Resolved DATABASE_URL:", process.env.DATABASE_URL);
@@ -608,6 +612,37 @@ registerSystemRoutes(app, {
   getBackendVersion,
 });
 
+// Initialise S3 when S3_BUCKET is configured.
+if (config.s3.bucket) {
+  initS3({
+    bucket: config.s3.bucket,
+    region: config.s3.region,
+    endpoint: config.s3.endpoint ?? undefined,
+    publicUrl: config.s3.publicUrl ?? undefined,
+    forcePathStyle: config.s3.forcePathStyle,
+    accessKeyId: config.s3.accessKeyId ?? undefined,
+    secretAccessKey: config.s3.secretAccessKey ?? undefined,
+  });
+  console.log(
+    `[S3] Enabled. Bucket: ${config.s3.bucket}, Region: ${config.s3.region}` +
+      (config.s3.endpoint ? `, Endpoint: ${config.s3.endpoint}` : "") +
+      (config.s3.publicUrl ? `, PublicURL: ${config.s3.publicUrl}` : " (private bucket — redirect mode)")
+  );
+} else {
+  console.log("[S3] Disabled — S3_BUCKET not configured. Images stored as base64 in SQLite.");
+}
+
+registerFileRoutes(app, { prisma, requireAuth, optionalAuth, asyncHandler });
+
+registerStorageRoutes(app, {
+  prisma,
+  requireAuth,
+  asyncHandler,
+  parseJsonField,
+  invalidateDrawingsCache,
+  io,
+});
+
 registerDashboardRoutes(app, {
   prisma,
   requireAuth,
@@ -628,6 +663,8 @@ registerDashboardRoutes(app, {
   MAX_PAGE_SIZE,
   config,
   logAuditEvent,
+  processFilesForS3: (files, userId, drawingId) =>
+    processFilesForS3(files, userId, drawingId, prisma),
 });
 
 registerImportExportRoutes({
@@ -679,20 +716,26 @@ setInterval(async () => {
 }, 60 * 60 * 1000);
 
 if (isMain) {
-  httpServer.listen(PORT, async () => {
-    await initializeUploadDir();
-    try {
-      await issueBootstrapSetupCodeIfRequired({
-        prisma,
-        ttlMs: config.bootstrapSetupCodeTtlMs,
-        authMode: config.authMode,
-        reason: "startup",
-      });
-    } catch (error) {
-      console.error("Failed to issue bootstrap setup code:", error);
-    }
-    console.log(`Server running on port ${PORT}`);
-    console.log(`Environment: ${config.nodeEnv}`);
-    console.log(`Frontend URL: ${config.frontendUrl}`);
-  });
+  // Apply SQLite PRAGMAs (WAL, busy_timeout) BEFORE listen() returns so the
+  // very first request can't race a still-pending journal-mode change.
+  // listen()'s callback fires after the socket is open, which is too late.
+  void (async () => {
+    await configureSqlite();
+    httpServer.listen(PORT, async () => {
+      await initializeUploadDir();
+      try {
+        await issueBootstrapSetupCodeIfRequired({
+          prisma,
+          ttlMs: config.bootstrapSetupCodeTtlMs,
+          authMode: config.authMode,
+          reason: "startup",
+        });
+      } catch (error) {
+        console.error("Failed to issue bootstrap setup code:", error);
+      }
+      console.log(`Server running on port ${PORT}`);
+      console.log(`Environment: ${config.nodeEnv}`);
+      console.log(`Frontend URL: ${config.frontendUrl}`);
+    });
+  })();
 }
