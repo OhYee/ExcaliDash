@@ -681,3 +681,27 @@ export const updateLibrary = async (items: LibraryItem[]): Promise<LibraryItem[]
   const response = await api.put<{ items: LibraryItem[] }>("/library", { items });
   return response.data.items;
 };
+
+// ---------------------------------------------------------------------------
+// S3 file upload helpers
+// ---------------------------------------------------------------------------
+
+/** Cache the result of the /files/config probe so we only call it once. */
+let s3EnabledCache: boolean | null = null;
+
+/**
+ * Returns true when the backend has S3 configured.
+ * The result is cached for the lifetime of the page.
+ */
+export const isS3Enabled = async (): Promise<boolean> => {
+  if (s3EnabledCache !== null) return s3EnabledCache;
+  try {
+    const response = await api.get<{ s3Enabled: boolean }>("/files/config");
+    s3EnabledCache = response.data.s3Enabled === true;
+  } catch {
+    s3EnabledCache = false;
+  }
+  return s3EnabledCache;
+};
+
+

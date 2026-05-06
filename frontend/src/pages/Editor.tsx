@@ -144,6 +144,7 @@ const loadDroppedImageData = async (file: File): Promise<DroppedImageData> => {
   };
 };
 
+
 // Content-based signature for detecting "live" changes even when Excalidraw doesn't
 // bump version/versionNonce/updated until commit (e.g. during shape creation drags).
 const getElementContentSig = (element: any): string => {
@@ -264,6 +265,8 @@ export const Editor: React.FC = () => {
   const pendingRemoteElementOrderRef = useRef<string[] | null>(null);
   const remoteFlushScheduledRef = useRef(false);
   const remoteFlushRafIdRef = useRef<number | null>(null);
+  /** File IDs present at initial drawing load — skip S3 re-upload for these. */
+  const initialFileIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     setAutoHideEnabled(getStoredAutoHideEnabled());
@@ -892,6 +895,8 @@ export const Editor: React.FC = () => {
     scrollToContent: true,
   }), []);
 
+
+
   const saveDataRef = useRef<((drawingId: string, elements: readonly any[], appState: any, files?: Record<string, any>) => Promise<void>) | null>(null);
   const savePreviewRef = useRef<((drawingId: string, elements: readonly any[], appState: any, files: any) => Promise<void>) | null>(null);
   const saveLibraryRef = useRef<((items: any[]) => Promise<void>) | null>(null);
@@ -928,7 +933,9 @@ export const Editor: React.FC = () => {
         });
         return;
       }
-      let persistableFiles = files ?? latestFilesRef.current ?? {};
+      let persistableFiles: Record<string, any> = files ?? latestFilesRef.current ?? {};
+      // Compress images before sending to the backend; the backend's
+      // processFilesForS3 will then upload the compressed bytes to S3.
       const compressedFilesResult = await compressExcalidrawFiles(persistableFiles);
       if (compressedFilesResult.changed) {
         persistableFiles = compressedFilesResult.files;
@@ -949,6 +956,7 @@ export const Editor: React.FC = () => {
           });
         }
       }
+
       const filesChangedSincePersist =
         Object.keys(getFilesDelta(lastPersistedFilesRef.current || {}, persistableFiles || {}))
           .length > 0;
@@ -1206,7 +1214,11 @@ export const Editor: React.FC = () => {
         latestFilesRef.current = nextFiles;
       }
       if (shouldSyncFiles) {
-        lastSyncedFilesRef.current = nextFiles;
+        // Only mark as synced the files we actually broadcast.
+        lastSyncedFilesRef.current = {
+          ...lastSyncedFilesRef.current,
+          ...filesDelta,
+        };
       }
 
       if (changes.length > 0 || shouldSyncFiles || shouldSyncOrder) {
@@ -1311,6 +1323,7 @@ export const Editor: React.FC = () => {
         latestFilesRef.current = files;
         lastSyncedFilesRef.current = files;
         lastPersistedFilesRef.current = files;
+        initialFileIdsRef.current = new Set(Object.keys(files));
         currentDrawingVersionRef.current = typeof data.version === "number" ? data.version : null;
         lastPersistedElementsRef.current = elements;
 
@@ -1552,6 +1565,7 @@ export const Editor: React.FC = () => {
           appState
         );
 
+        // Load image data (base64 + dimensions) for all dropped files.
         const loadedImages = await Promise.all(droppedImages.map(loadDroppedImageData));
         if (loadedImages.length === 0) return;
 
