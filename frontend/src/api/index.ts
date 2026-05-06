@@ -681,3 +681,99 @@ export const updateLibrary = async (items: LibraryItem[]): Promise<LibraryItem[]
   const response = await api.put<{ items: LibraryItem[] }>("/library", { items });
   return response.data.items;
 };
+
+// ---------------------------------------------------------------------------
+// S3 file upload helpers
+// ---------------------------------------------------------------------------
+
+/** Cached resolved result, settled successfully at least once. */
+let s3EnabledCache: boolean | null = null;
+/**
+ * In-flight promise so concurrent callers (e.g. many `DrawingCard`s
+ * mounting at once) coalesce onto a single `/files/config` request
+ * instead of stampeding the backend, and so a transient failure on
+ * one caller doesn't poison the cache for everyone.
+ */
+let s3EnabledInFlight: Promise<boolean> | null = null;
+
+/**
+ * Returns true when the backend has S3 configured.
+ * The successful result is cached for the lifetime of the page; on a
+ * transient request failure we let the next caller retry rather than
+ * permanently latching to false.
+ */
+export const isS3Enabled = async (): Promise<boolean> => {
+  if (s3EnabledCache !== null) return s3EnabledCache;
+  if (s3EnabledInFlight) return s3EnabledInFlight;
+
+  s3EnabledInFlight = (async () => {
+    try {
+      const response = await api.get<{ s3Enabled: boolean }>("/files/config");
+      s3EnabledCache = response.data.s3Enabled === true;
+      return s3EnabledCache;
+    } catch {
+      // Don't cache failures — a transient 401 during auth bootstrap or
+      // a network blip would otherwise permanently disable S3 for the
+      // rest of the page lifetime.
+      return false;
+    } finally {
+      s3EnabledInFlight = null;
+    }
+  })();
+
+  return s3EnabledInFlight;
+};
+
+// ---------------------------------------------------------------------------
+// Storage management
+// ---------------------------------------------------------------------------
+
+export type TrimResult = {
+  trimmed: {
+    elementsRemoved: number;
+    filesRemoved: number;
+    s3ObjectsDeleted: number;
+    s3DeleteErrors: number;
+  };
+};
+
+export type FileDiffEntry = {
+  fileId: string;
+  inCanvas: boolean;
+  inCanvasActive: boolean;
+  inSqlite: boolean;
+  inS3: boolean;
+  inS3Record: boolean;
+  s3Key: string | null;
+  mimeType: string | null;
+  s3SizeBytes: number | null;
+};
+
+export type FilesDiffResult = {
+  summary: {
+    totalCanvasRefs: number;
+    totalSqliteFiles: number;
+    totalS3Files: number;
+  };
+  files: FileDiffEntry[];
+};
+
+export type DeleteOrphansResult = {
+  deleted: number;
+  errors: number;
+};
+
+export const trimDrawing = async (id: string, confirmName: string): Promise<TrimResult> => {
+  const response = await api.post<TrimResult>(`/drawings/${id}/trim`, { confirmName });
+  return response.data;
+};
+
+export const getFilesDiff = async (id: string): Promise<FilesDiffResult> => {
+  const response = await api.get<FilesDiffResult>(`/drawings/${id}/files/diff`);
+  return response.data;
+};
+
+export const deleteOrphanFiles = async (id: string, confirmName: string, fileIds: string[]): Promise<DeleteOrphansResult> => {
+  const response = await api.delete<DeleteOrphansResult>(`/drawings/${id}/files/orphans`, { data: { confirmName, fileIds } });
+  return response.data;
+};

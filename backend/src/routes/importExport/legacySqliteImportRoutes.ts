@@ -12,6 +12,7 @@ import {
   resolveSafeUploadedFilePath,
   sanitizeDrawingData,
 } from "./shared";
+import { processFilesForS3 } from "../../fileProcessing";
 
 export const registerLegacySqliteImportRoutes = (deps: RegisterImportExportDeps) => {
   const {
@@ -257,6 +258,54 @@ export const registerLegacySqliteImportRoutes = (deps: RegisterImportExportDeps)
           });
         }
 
+        // Resolve final drawing id BEFORE uploading. Three cases:
+        //  1) no importedId: generate UUID, use it for both S3 and DB.
+        //  2) importedId conflicts with another user's drawing: generate
+        //     UUID; the in-transaction conflict path will reuse it.
+        //  3) otherwise: keep importedId.
+        // Without this, a conflict (case 2) would upload to S3 under
+        // importedId but write the row under a fresh uuidv4(), leaving
+        // permanent S3 orphans.
+        const finalDrawingIdMap = new Map<number, string>();
+        for (let i = 0; i < preparedDrawings.length; i++) {
+          const d = preparedDrawings[i];
+          let finalId: string;
+          if (!d.importedId) {
+            finalId = uuidv4();
+            d.importedId = finalId;
+          } else {
+            const existing = await prisma.drawing.findUnique({
+              where: { id: d.importedId },
+              select: { userId: true },
+            });
+            finalId =
+              existing && existing.userId !== req.user!.id
+                ? uuidv4()
+                : d.importedId;
+          }
+          finalDrawingIdMap.set(i, finalId);
+        }
+
+        // Bounded concurrency to avoid stalling on large imports.
+        const S3_UPLOAD_CONCURRENCY = 8;
+        const processedFilesMap = new Map<number, Record<string, any>>();
+        for (let start = 0; start < preparedDrawings.length; start += S3_UPLOAD_CONCURRENCY) {
+          const batch = preparedDrawings
+            .slice(start, start + S3_UPLOAD_CONCURRENCY)
+            .map((d, offset) => {
+              const i = start + offset;
+              const files = d.sanitized.files || {};
+              const finalId = finalDrawingIdMap.get(i)!;
+              return processFilesForS3(files, req.user!.id, finalId, prisma).then(
+                (processed) => ({ i, processed })
+              );
+            });
+          const results = await Promise.all(batch);
+          for (const { i, processed } of results) {
+            processedFilesMap.set(i, processed);
+          }
+        }
+
         const result = await prisma.$transaction(async (tx) => {
           const trashCollectionId = getUserTrashCollectionId(req.user!.id);
           const hasTrash = importedDrawings.some((d) => String(d.collectionId || "") === "trash");
@@ -330,19 +379,23 @@ export const registerLegacySqliteImportRoutes = (deps: RegisterImportExportDeps)
             return null;
           };
 
-          for (const d of preparedDrawings) {
+          for (let i = 0; i < preparedDrawings.length; i++) {
+            const d = preparedDrawings[i];
+            const processedFiles = processedFilesMap.get(i) ?? {};
             const resolvedCollectionId = resolveImportedCollectionId(d.collectionIdRaw, d.collectionNameRaw);
             const existing = d.importedId ? await tx.drawing.findUnique({ where: { id: d.importedId } }) : null;
+            // Always use the id we committed to before the S3 upload, so
+            // the row's S3 keys point to objects that actually exist.
+            const finalId = finalDrawingIdMap.get(i) ?? d.importedId ?? uuidv4();
 
             if (!existing) {
-              const idToUse = d.importedId || uuidv4();
               await tx.drawing.create({
                 data: {
-                  id: idToUse,
+                  id: finalId,
                   name: d.name,
                   elements: JSON.stringify(d.sanitized.elements),
                   appState: JSON.stringify(d.sanitized.appState),
-                  files: JSON.stringify(d.sanitized.files || {}),
+                  files: JSON.stringify(processedFiles),
                   preview: d.sanitized.preview ?? null,
                   version: Number.isFinite(Number(d.versionRaw)) ? Number(d.versionRaw) : 1,
                   userId: req.user!.id,
@@ -360,7 +413,7 @@ export const registerLegacySqliteImportRoutes = (deps: RegisterImportExportDeps)
                   name: d.name,
                   elements: JSON.stringify(d.sanitized.elements),
                   appState: JSON.stringify(d.sanitized.appState),
-                  files: JSON.stringify(d.sanitized.files || {}),
+                  files: JSON.stringify(processedFiles),
                   preview: d.sanitized.preview ?? null,
                   version: Number.isFinite(Number(d.versionRaw)) ? Number(d.versionRaw) : existing.version,
                   collectionId: resolvedCollectionId ?? null,
@@ -370,14 +423,29 @@ export const registerLegacySqliteImportRoutes = (deps: RegisterImportExportDeps)
               continue;
             }
 
-            const newId = uuidv4();
+            // Race-safe id: the pre-upload finalId may have been kept as
+            // d.importedId because no conflict was visible at the time;
+            // a conflict that appeared since this point would otherwise
+            // explode the entire transaction with a unique constraint
+            // error. If finalId would collide with the now-existing row,
+            // generate a fresh id; the S3 objects under the original id
+            // become orphans the storage tools can sweep up later.
+            const createId =
+              finalId === d.importedId ? uuidv4() : finalId;
+            if (createId !== finalId) {
+              console.warn(
+                `[import/legacy] race conflict on drawing ${d.importedId}; ` +
+                  `creating under ${createId}; S3 objects keyed under ` +
+                  `${d.importedId} are now orphans`,
+              );
+            }
             await tx.drawing.create({
               data: {
-                id: newId,
+                id: createId,
                 name: d.name,
                 elements: JSON.stringify(d.sanitized.elements),
                 appState: JSON.stringify(d.sanitized.appState),
-                files: JSON.stringify(d.sanitized.files || {}),
+                files: JSON.stringify(processedFiles),
                 preview: d.sanitized.preview ?? null,
                 version: Number.isFinite(Number(d.versionRaw)) ? Number(d.versionRaw) : 1,
                 userId: req.user!.id,

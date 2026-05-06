@@ -492,6 +492,20 @@ export const sanitizeDrawingData = (data: {
 
       const MAX_DATAURL_SIZE = activeConfig.maxDataUrlSize;
 
+      // Drop entries whose key would not be safe to embed in an S3 object
+      // path. Backend file-storage code uses the fileId as a path segment,
+      // so a malicious key like "../../foo" must never reach the uploader
+      // or the database row. Same regex as backend/src/routes/files.ts.
+      // Snapshot the key list before mutating: deleting properties while
+      // iterating with `for...in` can skip entries depending on engine
+      // ordering, leaving an unsafe key in place.
+      const VALID_FILE_ID = /^[\w-]{1,200}$/;
+      for (const fileId of Object.keys(sanitizedFiles)) {
+        if (!VALID_FILE_ID.test(fileId)) {
+          delete sanitizedFiles[fileId];
+        }
+      }
+
       for (const fileId in sanitizedFiles) {
         const file = sanitizedFiles[fileId];
         if (typeof file === "object" && file !== null) {
@@ -525,6 +539,23 @@ export const sanitizeDrawingData = (data: {
                   } else {
                     file[key] = value;
                   }
+                } else if (/^https?:\/\//i.test(value)) {
+                  // S3 / CDN public URL — validate format, no HTML
+                  // injection risk. Both http:// and https:// are
+                  // accepted because S3_PUBLIC_URL may legitimately be
+                  // a plain-HTTP MinIO / dev endpoint.
+                  const hasSuspiciousContent = suspiciousPatterns.some(
+                    (pattern) => pattern.test(value)
+                  );
+                  if (hasSuspiciousContent || value.length > 2048) {
+                    file[key] = "";
+                  } else {
+                    file[key] = value;
+                  }
+                } else if (/^\/api\/files\/[\w-]{1,200}\/[\w-]{1,200}$/.test(value)) {
+                  // Private-bucket redirect path /api/files/:drawingId/:fileId
+                  // — allow as-is.
+                  file[key] = value;
                 } else {
                   file[key] = sanitizeText(value, 1000);
                 }

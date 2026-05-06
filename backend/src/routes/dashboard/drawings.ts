@@ -1,5 +1,14 @@
+import crypto from "crypto";
 import express from "express";
 import { Prisma } from "../../generated/client";
+import {
+  isS3Enabled,
+  listS3Objects,
+  deleteS3Object,
+  copyS3Object,
+  drawingS3Prefix,
+} from "../../s3";
+import { rewritePreviewForS3 } from "../../fileProcessing";
 import { DashboardRouteDeps, SortDirection, SortField } from "./types";
 import {
   getUserTrashCollectionId,
@@ -40,6 +49,7 @@ export const registerDrawingRoutes = (
     MAX_PAGE_SIZE,
     config,
     logAuditEvent,
+    processFilesForS3,
   } = deps;
 
   const getRequestPrincipal = async (
@@ -398,15 +408,32 @@ export const registerDrawingRoutes = (
       await ensureTrashCollection(prisma, req.user.id);
     }
 
+    const drawingId = crypto.randomUUID();
+    const originalFiles = (payload.files ?? {}) as Record<string, any>;
+    const processedFiles = await processFilesForS3(
+      originalFiles,
+      req.user.id,
+      drawingId
+    );
+    // Rewrite the preview SVG so it points at the just-uploaded S3 URLs
+    // instead of inlining the megabyte-scale base64 dataURL the frontend
+    // generated before the upload completed.
+    const processedPreview = rewritePreviewForS3(
+      payload.preview ?? null,
+      originalFiles,
+      processedFiles,
+    ) as string | null | undefined;
+
     const newDrawing = await prisma.drawing.create({
       data: {
+        id: drawingId,
         name: drawingName,
         elements: JSON.stringify(payload.elements),
         appState: JSON.stringify(payload.appState),
         userId: req.user.id,
         collectionId: targetCollectionId,
-        preview: payload.preview ?? null,
-        files: JSON.stringify(payload.files ?? {}),
+        preview: processedPreview ?? null,
+        files: JSON.stringify(processedFiles),
       },
     });
     invalidateDrawingsCache();
@@ -463,8 +490,68 @@ export const registerDrawingRoutes = (
     if (payload.name !== undefined) data.name = payload.name;
     if (payload.elements !== undefined) data.elements = JSON.stringify(payload.elements);
     if (payload.appState !== undefined) data.appState = JSON.stringify(payload.appState);
-    if (payload.files !== undefined) data.files = JSON.stringify(payload.files);
-    if (payload.preview !== undefined) data.preview = payload.preview;
+    if (payload.files !== undefined) {
+      // Reject the upload upfront when the caller's expected version no
+      // longer matches reality. processFilesForS3 PUTs every base64 file
+      // straight to S3, which would otherwise leak as permanent orphans
+      // when the subsequent updateMany returns 0 rows on conflict.
+      if (isSceneUpdate && payload.version !== undefined) {
+        const latest = await prisma.drawing.findFirst({
+          where: { id },
+          select: { version: true },
+        });
+        if (!latest || latest.version !== payload.version) {
+          return res.status(409).json({
+            error: "Conflict",
+            code: "VERSION_CONFLICT",
+            message: "Drawing has changed since this editor state was loaded.",
+            currentVersion: latest?.version ?? null,
+          });
+        }
+      }
+
+      // Non-owner editors (link-share with edit permission, etc.) must
+      // not be able to add new file ids — they would write under the
+      // owner's S3 prefix and could be used to fill the owner's bucket.
+      // Existing fileIds may still appear (e.g. an unchanged scene save).
+      if (!isOwnerAccess(access)) {
+        const existingFiles = parseJsonField<Record<string, unknown>>(
+          existingDrawing.files,
+          {}
+        );
+        const existingIds = new Set(Object.keys(existingFiles));
+        for (const newId of Object.keys(payload.files)) {
+          if (!existingIds.has(newId)) {
+            return res.status(403).json({
+              error: "Forbidden",
+              message:
+                "Only the drawing owner can upload new images to this drawing.",
+            });
+          }
+        }
+      }
+
+      const originalFiles = payload.files as Record<string, any>;
+      const processedFiles = await processFilesForS3(
+        originalFiles,
+        existingDrawing.userId,
+        id
+      );
+      data.files = JSON.stringify(processedFiles);
+
+      if (payload.preview !== undefined) {
+        // Rewrite preview so the SVG embeds the new S3 URLs instead of
+        // the original base64 dataURLs (the frontend generates the
+        // preview before this round-trip uploads the files).
+        data.preview = rewritePreviewForS3(
+          payload.preview,
+          originalFiles,
+          processedFiles,
+        ) as string | null | undefined;
+      }
+    } else if (payload.preview !== undefined) {
+      data.preview = payload.preview;
+    }
 
     if (payload.collectionId !== undefined) {
       if (!isOwnerAccess(access)) {
@@ -580,6 +667,31 @@ export const registerDrawingRoutes = (
     }
     invalidateDrawingsCache();
 
+    // Best-effort S3 cleanup so the bucket and the S3File rows don't grow
+    // unboundedly with deleted-drawing remnants. The S3File rows are
+    // (drawingId, fileId)-keyed and S3 objects sit under a per-drawing
+    // path, so this can never delete storage owned by another drawing
+    // (e.g. a duplicate that was made before this delete). Failures are
+    // logged but not surfaced — the drawing row is already gone.
+    if (isS3Enabled()) {
+      const s3Prefix = drawingS3Prefix(req.user.id, id);
+      try {
+        const objects = await listS3Objects(s3Prefix);
+        for (const obj of objects) {
+          try {
+            await deleteS3Object(obj.key);
+          } catch (err) {
+            console.error(`[drawings/delete] Failed to delete S3 object: ${obj.key}`, err);
+          }
+        }
+        await prisma.s3File.deleteMany({
+          where: { drawingId: id },
+        });
+      } catch (err) {
+        console.error(`[drawings/delete] S3 cleanup failed for drawing ${id}`, err);
+      }
+    }
+
     if (config.enableAuditLogging) {
       await logAuditEvent({
         userId: req.user.id,
@@ -606,17 +718,115 @@ export const registerDrawingRoutes = (
       duplicatedCollectionId = getUserTrashCollectionId(req.user.id);
     }
 
-    const newDrawing = await prisma.drawing.create({
-      data: {
-        name: `${original.name} (Copy)`,
-        elements: original.elements,
-        appState: original.appState,
-        files: original.files,
-        userId: req.user.id,
-        collectionId: duplicatedCollectionId,
-        version: 1,
-      },
+    // Pre-allocate the new drawing id so we can copy S3 objects to its
+    // per-drawing prefix BEFORE inserting the row. If a copy fails we
+    // can roll back by deleting any objects already copied without ever
+    // exposing a half-broken duplicate to the caller.
+    const newDrawingId = crypto.randomUUID();
+    let duplicatedFilesJson = original.files;
+
+    if (isS3Enabled()) {
+      const sourceFiles = await prisma.s3File.findMany({
+        where: { drawingId: original.id },
+      });
+
+      if (sourceFiles.length > 0) {
+        const filesObj = parseJsonField<Record<string, any>>(
+          original.files,
+          {},
+        );
+        const copiedKeys: string[] = [];
+
+        try {
+          for (const src of sourceFiles) {
+            const destKey = src.s3Key.replace(
+              `/${original.id}/`,
+              `/${newDrawingId}/`,
+            );
+            // Server-side copy. If this throws, the catch below cleans
+            // up everything we copied so far and surfaces an error
+            // instead of silently leaving the duplicate pointing at the
+            // original's S3 prefix.
+            await copyS3Object(src.s3Key, destKey, src.mimeType);
+            copiedKeys.push(destKey);
+
+            const file = filesObj[src.fileId];
+            if (file && typeof file.dataURL === "string") {
+              const next = file.dataURL
+                .replace(
+                  `/api/files/${original.id}/`,
+                  `/api/files/${newDrawingId}/`,
+                )
+                .replace(`/${original.id}/`, `/${newDrawingId}/`);
+              if (next !== file.dataURL) {
+                filesObj[src.fileId] = { ...file, dataURL: next };
+              }
+            }
+          }
+        } catch (err) {
+          console.error(
+            `[drawings/duplicate] S3 copy failed; rolling back ${copiedKeys.length} object(s)`,
+            err,
+          );
+          for (const key of copiedKeys) {
+            try {
+              await deleteS3Object(key);
+            } catch (deleteErr) {
+              console.error(
+                `[drawings/duplicate] rollback delete failed for ${key}`,
+                deleteErr,
+              );
+            }
+          }
+          return res.status(500).json({
+            error: "Failed to duplicate drawing",
+            message:
+              "Could not copy image storage for the new drawing; the original is unchanged.",
+          });
+        }
+
+        duplicatedFilesJson = JSON.stringify(filesObj);
+      }
+    }
+
+    const newDrawing = await prisma.$transaction(async (tx) => {
+      const created = await tx.drawing.create({
+        data: {
+          id: newDrawingId,
+          name: `${original.name} (Copy)`,
+          elements: original.elements,
+          appState: original.appState,
+          files: duplicatedFilesJson,
+          userId: req.user!.id,
+          collectionId: duplicatedCollectionId,
+          version: 1,
+        },
+      });
+
+      if (isS3Enabled()) {
+        const sourceFiles = await tx.s3File.findMany({
+          where: { drawingId: original.id },
+        });
+        for (const src of sourceFiles) {
+          const destKey = src.s3Key.replace(
+            `/${original.id}/`,
+            `/${newDrawingId}/`,
+          );
+          await tx.s3File.create({
+            data: {
+              drawingId: newDrawingId,
+              fileId: src.fileId,
+              userId: req.user!.id,
+              s3Key: destKey,
+              mimeType: src.mimeType,
+            },
+          });
+        }
+      }
+
+      return created;
     });
+
     invalidateDrawingsCache();
 
     return res.json({
@@ -624,7 +834,7 @@ export const registerDrawingRoutes = (
       collectionId: toPublicTrashCollectionId(newDrawing.collectionId, req.user.id),
       elements: parseJsonField(newDrawing.elements, []),
       appState: parseJsonField(newDrawing.appState, {}),
-      files: parseJsonField(newDrawing.files, {}),
+      files: parseJsonField(duplicatedFilesJson, {}),
     });
   }));
 

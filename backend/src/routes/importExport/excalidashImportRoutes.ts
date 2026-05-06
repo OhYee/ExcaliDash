@@ -12,6 +12,7 @@ import {
   getUserTrashCollectionId,
   sanitizeDrawingData,
 } from "./shared";
+import { processFilesForS3 } from "../../fileProcessing";
 
 const isSafeMulterTempFilename = (value: string): boolean => /^[a-f0-9]{32}$/.test(value);
 
@@ -334,6 +335,46 @@ export const registerExcalidashImportRoutes = (deps: RegisterImportExportDeps) =
         throw error;
       }
 
+      // Resolve the final drawing id used for each prepared drawing
+      // BEFORE uploading. If the manifest id collides with a drawing
+      // owned by someone else, we will write under a fresh UUID inside
+      // the transaction — and S3 keys must match that final id, otherwise
+      // the uploaded objects become permanent orphans.
+      const finalDrawingIdMap = new Map<number, string>();
+      for (let i = 0; i < preparedDrawings.length; i++) {
+        const prepared = preparedDrawings[i];
+        const existing = await prisma.drawing.findUnique({
+          where: { id: prepared.id },
+          select: { userId: true },
+        });
+        const finalId =
+          existing && existing.userId !== req.user!.id ? uuidv4() : prepared.id;
+        finalDrawingIdMap.set(i, finalId);
+      }
+
+      // Process files for S3 upload before entering the transaction.
+      // Bounded concurrency keeps thousands-of-drawings imports from
+      // saturating S3 sockets or stalling the request to a reverse-proxy
+      // timeout.
+      const S3_UPLOAD_CONCURRENCY = 8;
+      const processedFilesMap = new Map<number, Record<string, any>>();
+      for (let start = 0; start < preparedDrawings.length; start += S3_UPLOAD_CONCURRENCY) {
+        const batch = preparedDrawings
+          .slice(start, start + S3_UPLOAD_CONCURRENCY)
+          .map((prepared, offset) => {
+            const i = start + offset;
+            const files = prepared.sanitized.files || {};
+            const finalId = finalDrawingIdMap.get(i)!;
+            return processFilesForS3(files, req.user!.id, finalId, prisma).then(
+              (processed) => ({ i, processed })
+            );
+          });
+        const results = await Promise.all(batch);
+        for (const { i, processed } of results) {
+          processedFilesMap.set(i, processed);
+        }
+      }
+
       const result = await prisma.$transaction(async (tx) => {
         const trashCollectionId = getUserTrashCollectionId(req.user!.id);
         const collectionIdMap = new Map<string, string>();
@@ -390,17 +431,24 @@ export const registerExcalidashImportRoutes = (deps: RegisterImportExportDeps) =
           return collectionIdMap.get(collectionId) || null;
         };
 
-        for (const prepared of preparedDrawings) {
+        for (let i = 0; i < preparedDrawings.length; i++) {
+          const prepared = preparedDrawings[i];
+          const processedFiles = processedFilesMap.get(i) ?? {};
           const targetCollectionId = resolveCollectionId(prepared.collectionId);
           const existing = await tx.drawing.findUnique({ where: { id: prepared.id } });
+          // Reuse the id we committed to before the S3 upload. If the
+          // pre-upload check disagrees with the in-transaction state
+          // (race), we still write under finalId so the file path
+          // matches what was uploaded.
+          const finalId = finalDrawingIdMap.get(i) ?? prepared.id;
           if (!existing) {
             await tx.drawing.create({
               data: {
-                id: prepared.id,
+                id: finalId,
                 name: prepared.name,
                 elements: JSON.stringify(prepared.sanitized.elements),
                 appState: JSON.stringify(prepared.sanitized.appState),
-                files: JSON.stringify(prepared.sanitized.files || {}),
+                files: JSON.stringify(processedFiles),
                 preview: prepared.sanitized.preview ?? null,
                 version: prepared.version ?? 1,
                 userId: req.user!.id,
@@ -418,7 +466,7 @@ export const registerExcalidashImportRoutes = (deps: RegisterImportExportDeps) =
                 name: prepared.name,
                 elements: JSON.stringify(prepared.sanitized.elements),
                 appState: JSON.stringify(prepared.sanitized.appState),
-                files: JSON.stringify(prepared.sanitized.files || {}),
+                files: JSON.stringify(processedFiles),
                 preview: prepared.sanitized.preview ?? null,
                 version: prepared.version ?? existing.version,
                 collectionId: targetCollectionId,
@@ -428,14 +476,31 @@ export const registerExcalidashImportRoutes = (deps: RegisterImportExportDeps) =
             continue;
           }
 
-          const newId = uuidv4();
+          // Race-safe id selection inside the transaction. The pre-upload
+          // check (which sets finalDrawingIdMap) may have decided
+          // finalId === prepared.id because no conflict was visible at
+          // that time, but a conflict may have appeared since. If the
+          // tx-time `existing` is owned by someone else AND finalId still
+          // equals prepared.id, regenerate a fresh id rather than letting
+          // tx.drawing.create hit a unique-constraint error and abort the
+          // whole import. The S3 objects we uploaded sit under the
+          // prepared.id path; they become orphans the storage tools can
+          // sweep up.
+          const createId = finalId === prepared.id ? uuidv4() : finalId;
+          if (createId !== finalId) {
+            console.warn(
+              `[import/excalidash] race conflict on drawing ${prepared.id}; ` +
+                `creating under ${createId}; S3 objects keyed under ` +
+                `${prepared.id} are now orphans`,
+            );
+          }
           await tx.drawing.create({
             data: {
-              id: newId,
+              id: createId,
               name: prepared.name,
               elements: JSON.stringify(prepared.sanitized.elements),
               appState: JSON.stringify(prepared.sanitized.appState),
-              files: JSON.stringify(prepared.sanitized.files || {}),
+              files: JSON.stringify(processedFiles),
               preview: prepared.sanitized.preview ?? null,
               version: prepared.version ?? 1,
               userId: req.user!.id,
