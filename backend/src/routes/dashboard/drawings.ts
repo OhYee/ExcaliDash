@@ -718,23 +718,13 @@ export const registerDrawingRoutes = (
       duplicatedCollectionId = getUserTrashCollectionId(req.user.id);
     }
 
-    const newDrawing = await prisma.drawing.create({
-      data: {
-        name: `${original.name} (Copy)`,
-        elements: original.elements,
-        appState: original.appState,
-        files: original.files,
-        userId: req.user.id,
-        collectionId: duplicatedCollectionId,
-        version: 1,
-      },
-    });
+    // Pre-allocate the new drawing id so we can copy S3 objects to its
+    // per-drawing prefix BEFORE inserting the row. If a copy fails we
+    // can roll back by deleting any objects already copied without ever
+    // exposing a half-broken duplicate to the caller.
+    const newDrawingId = crypto.randomUUID();
+    let duplicatedFilesJson = original.files;
 
-    // Copy S3 storage so the duplicate stops sharing objects with the
-    // original. Without this, deleting the original (which prunes the
-    // original's S3 prefix) would silently break every image in the
-    // duplicate's scene.
-    let duplicatedFilesJson = newDrawing.files;
     if (isS3Enabled()) {
       const sourceFiles = await prisma.s3File.findMany({
         where: { drawingId: original.id },
@@ -742,62 +732,100 @@ export const registerDrawingRoutes = (
 
       if (sourceFiles.length > 0) {
         const filesObj = parseJsonField<Record<string, any>>(
-          newDrawing.files,
+          original.files,
           {},
         );
+        const copiedKeys: string[] = [];
 
+        try {
+          for (const src of sourceFiles) {
+            const destKey = src.s3Key.replace(
+              `/${original.id}/`,
+              `/${newDrawingId}/`,
+            );
+            // Server-side copy. If this throws, the catch below cleans
+            // up everything we copied so far and surfaces an error
+            // instead of silently leaving the duplicate pointing at the
+            // original's S3 prefix.
+            await copyS3Object(src.s3Key, destKey, src.mimeType);
+            copiedKeys.push(destKey);
+
+            const file = filesObj[src.fileId];
+            if (file && typeof file.dataURL === "string") {
+              const next = file.dataURL
+                .replace(
+                  `/api/files/${original.id}/`,
+                  `/api/files/${newDrawingId}/`,
+                )
+                .replace(`/${original.id}/`, `/${newDrawingId}/`);
+              if (next !== file.dataURL) {
+                filesObj[src.fileId] = { ...file, dataURL: next };
+              }
+            }
+          }
+        } catch (err) {
+          console.error(
+            `[drawings/duplicate] S3 copy failed; rolling back ${copiedKeys.length} object(s)`,
+            err,
+          );
+          for (const key of copiedKeys) {
+            try {
+              await deleteS3Object(key);
+            } catch (deleteErr) {
+              console.error(
+                `[drawings/duplicate] rollback delete failed for ${key}`,
+                deleteErr,
+              );
+            }
+          }
+          return res.status(500).json({
+            error: "Failed to duplicate drawing",
+            message:
+              "Could not copy image storage for the new drawing; the original is unchanged.",
+          });
+        }
+
+        duplicatedFilesJson = JSON.stringify(filesObj);
+      }
+    }
+
+    const newDrawing = await prisma.$transaction(async (tx) => {
+      const created = await tx.drawing.create({
+        data: {
+          id: newDrawingId,
+          name: `${original.name} (Copy)`,
+          elements: original.elements,
+          appState: original.appState,
+          files: duplicatedFilesJson,
+          userId: req.user!.id,
+          collectionId: duplicatedCollectionId,
+          version: 1,
+        },
+      });
+
+      if (isS3Enabled()) {
+        const sourceFiles = await tx.s3File.findMany({
+          where: { drawingId: original.id },
+        });
         for (const src of sourceFiles) {
-          // Replace `/{originalId}/` with `/{newId}/` exactly once at
-          // the per-drawing folder boundary in the s3Key.
           const destKey = src.s3Key.replace(
             `/${original.id}/`,
-            `/${newDrawing.id}/`,
+            `/${newDrawingId}/`,
           );
-
-          try {
-            await copyS3Object(src.s3Key, destKey, src.mimeType);
-          } catch (err) {
-            console.error(
-              `[drawings/duplicate] Failed to copy ${src.s3Key} -> ${destKey}`,
-              err,
-            );
-            continue;
-          }
-
-          await prisma.s3File.create({
+          await tx.s3File.create({
             data: {
-              drawingId: newDrawing.id,
+              drawingId: newDrawingId,
               fileId: src.fileId,
-              userId: req.user.id,
+              userId: req.user!.id,
               s3Key: destKey,
               mimeType: src.mimeType,
             },
           });
-
-          // Rewrite dataURL so private-bucket redirects and public CDN
-          // links point at the new object instead of the original's.
-          const file = filesObj[src.fileId];
-          if (file && typeof file.dataURL === "string") {
-            const next = file.dataURL
-              .replace(
-                `/api/files/${original.id}/`,
-                `/api/files/${newDrawing.id}/`,
-              )
-              .replace(`/${original.id}/`, `/${newDrawing.id}/`);
-            if (next !== file.dataURL) {
-              filesObj[src.fileId] = { ...file, dataURL: next };
-            }
-          }
         }
-
-        const serialised = JSON.stringify(filesObj);
-        await prisma.drawing.update({
-          where: { id: newDrawing.id },
-          data: { files: serialised },
-        });
-        duplicatedFilesJson = serialised;
       }
-    }
+
+      return created;
+    });
 
     invalidateDrawingsCache();
 
