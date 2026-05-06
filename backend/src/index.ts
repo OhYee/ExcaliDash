@@ -28,7 +28,7 @@ import { logAuditEvent } from "./utils/audit";
 import { registerDashboardRoutes } from "./routes/dashboard";
 import { registerImportExportRoutes } from "./routes/importExport";
 import { registerSystemRoutes } from "./routes/system";
-import { prisma } from "./db/prisma";
+import { prisma, configureSqlite } from "./db/prisma";
 import { createDrawingsCacheStore } from "./server/drawingsCache";
 import { registerCsrfProtection } from "./server/csrf";
 import { registerSocketHandlers } from "./server/socket";
@@ -679,20 +679,26 @@ setInterval(async () => {
 }, 60 * 60 * 1000);
 
 if (isMain) {
-  httpServer.listen(PORT, async () => {
-    await initializeUploadDir();
-    try {
-      await issueBootstrapSetupCodeIfRequired({
-        prisma,
-        ttlMs: config.bootstrapSetupCodeTtlMs,
-        authMode: config.authMode,
-        reason: "startup",
-      });
-    } catch (error) {
-      console.error("Failed to issue bootstrap setup code:", error);
-    }
-    console.log(`Server running on port ${PORT}`);
-    console.log(`Environment: ${config.nodeEnv}`);
-    console.log(`Frontend URL: ${config.frontendUrl}`);
-  });
+  // Apply SQLite PRAGMAs (WAL, busy_timeout) BEFORE listen() returns so the
+  // very first request can't race a still-pending journal-mode change.
+  // listen()'s callback fires after the socket is open, which is too late.
+  void (async () => {
+    await configureSqlite();
+    httpServer.listen(PORT, async () => {
+      await initializeUploadDir();
+      try {
+        await issueBootstrapSetupCodeIfRequired({
+          prisma,
+          ttlMs: config.bootstrapSetupCodeTtlMs,
+          authMode: config.authMode,
+          reason: "startup",
+        });
+      } catch (error) {
+        console.error("Failed to issue bootstrap setup code:", error);
+      }
+      console.log(`Server running on port ${PORT}`);
+      console.log(`Environment: ${config.nodeEnv}`);
+      console.log(`Frontend URL: ${config.frontendUrl}`);
+    });
+  })();
 }
