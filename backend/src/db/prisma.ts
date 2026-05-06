@@ -26,8 +26,12 @@ export async function configureSqlite(): Promise<void> {
     return;
   }
   try {
-    await prismaClient.$executeRawUnsafe("PRAGMA journal_mode = WAL;");
-    await prismaClient.$executeRawUnsafe("PRAGMA busy_timeout = 5000;");
+    // PRAGMA statements return rows (e.g. journal_mode returns "wal",
+    // busy_timeout returns 5000), so $executeRawUnsafe rejects them with
+    // "Execute returned results, which is not allowed in SQLite". Use
+    // $queryRawUnsafe to accept the returned row and discard it.
+    await prismaClient.$queryRawUnsafe("PRAGMA journal_mode = WAL;");
+    await prismaClient.$queryRawUnsafe("PRAGMA busy_timeout = 5000;");
   } catch (err) {
     // Surface real failures (e.g. permission, corrupted db) instead of swallowing.
     console.warn("[prisma] Failed to configure SQLite PRAGMAs:", err);
