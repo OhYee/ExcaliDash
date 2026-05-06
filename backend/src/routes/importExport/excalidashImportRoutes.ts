@@ -476,9 +476,27 @@ export const registerExcalidashImportRoutes = (deps: RegisterImportExportDeps) =
             continue;
           }
 
+          // Race-safe id selection inside the transaction. The pre-upload
+          // check (which sets finalDrawingIdMap) may have decided
+          // finalId === prepared.id because no conflict was visible at
+          // that time, but a conflict may have appeared since. If the
+          // tx-time `existing` is owned by someone else AND finalId still
+          // equals prepared.id, regenerate a fresh id rather than letting
+          // tx.drawing.create hit a unique-constraint error and abort the
+          // whole import. The S3 objects we uploaded sit under the
+          // prepared.id path; they become orphans the storage tools can
+          // sweep up.
+          const createId = finalId === prepared.id ? uuidv4() : finalId;
+          if (createId !== finalId) {
+            console.warn(
+              `[import/excalidash] race conflict on drawing ${prepared.id}; ` +
+                `creating under ${createId}; S3 objects keyed under ` +
+                `${prepared.id} are now orphans`,
+            );
+          }
           await tx.drawing.create({
             data: {
-              id: finalId,
+              id: createId,
               name: prepared.name,
               elements: JSON.stringify(prepared.sanitized.elements),
               appState: JSON.stringify(prepared.sanitized.appState),

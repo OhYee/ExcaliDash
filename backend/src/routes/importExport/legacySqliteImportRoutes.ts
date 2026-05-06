@@ -423,9 +423,25 @@ export const registerLegacySqliteImportRoutes = (deps: RegisterImportExportDeps)
               continue;
             }
 
+            // Race-safe id: the pre-upload finalId may have been kept as
+            // d.importedId because no conflict was visible at the time;
+            // a conflict that appeared since this point would otherwise
+            // explode the entire transaction with a unique constraint
+            // error. If finalId would collide with the now-existing row,
+            // generate a fresh id; the S3 objects under the original id
+            // become orphans the storage tools can sweep up later.
+            const createId =
+              finalId === d.importedId ? uuidv4() : finalId;
+            if (createId !== finalId) {
+              console.warn(
+                `[import/legacy] race conflict on drawing ${d.importedId}; ` +
+                  `creating under ${createId}; S3 objects keyed under ` +
+                  `${d.importedId} are now orphans`,
+              );
+            }
             await tx.drawing.create({
               data: {
-                id: finalId,
+                id: createId,
                 name: d.name,
                 elements: JSON.stringify(d.sanitized.elements),
                 appState: JSON.stringify(d.sanitized.appState),
