@@ -7,18 +7,19 @@
 -- prefix-scoped cleanup deleted objects the sibling drawing still
 -- needed.
 --
--- This migration drops the existing S3File rows and recreates the
--- table with the new shape. Public-bucket deployments are unaffected
--- (image dataURLs already encode the bucket URL directly). Private-
--- bucket deployments will see /api/files/:drawingId/:fileId 404 for
--- pre-existing images until each affected drawing is re-saved (the
--- save flow upserts a fresh row per (drawingId, fileId) only when it
--- detects new base64 dataURLs, so legacy rows must be rebuilt by hand
--- if needed). S3 objects themselves are untouched.
+-- We preserve existing rows by parsing the drawingId out of the
+-- s3Key. Pre-existing keys all follow the layout produced by uploads
+-- so far:
+--   {prefix}/{userId}/{drawingId}/{fileId}.{ext}
+-- (the default prefix `excalidash` has no internal slashes, so we look
+-- for the third '/' in the key and take the segment that ends at it.)
+-- Operators with a custom S3_KEY_PREFIX containing '/' should re-save
+-- affected drawings after deploying — those rows fall through and are
+-- dropped (private-bucket access falls back to 404 until re-saved,
+-- public-bucket dataURLs keep working as the dataURL itself encodes
+-- the URL directly).
 
-DROP TABLE IF EXISTS "S3File";
-
-CREATE TABLE "S3File" (
+CREATE TABLE "new_S3File" (
     "drawingId" TEXT NOT NULL,
     "fileId"    TEXT NOT NULL,
     "userId"    TEXT NOT NULL,
@@ -27,6 +28,52 @@ CREATE TABLE "S3File" (
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY ("drawingId", "fileId")
 );
+
+-- Extract `drawingId` = the path segment between the second and third
+-- '/' in s3Key. SQLite has INSTR + SUBSTR but no native split, so we
+-- chain three scans of the string:
+--   p1 = INSTR(s3Key, '/')
+--   tail1 = SUBSTR(s3Key, p1+1)
+--   p2_local = INSTR(tail1, '/')
+--   tail2 = SUBSTR(tail1, p2_local+1)
+--   p3_local = INSTR(tail2, '/')
+--   drawingId = SUBSTR(tail2, 1, p3_local - 1)
+INSERT OR IGNORE INTO "new_S3File"
+    ("drawingId", "fileId", "userId", "s3Key", "mimeType", "createdAt")
+SELECT
+    SUBSTR(
+        SUBSTR(
+            SUBSTR(s3Key, INSTR(s3Key, '/') + 1),
+            INSTR(SUBSTR(s3Key, INSTR(s3Key, '/') + 1), '/') + 1
+        ),
+        1,
+        INSTR(
+            SUBSTR(
+                SUBSTR(s3Key, INSTR(s3Key, '/') + 1),
+                INSTR(SUBSTR(s3Key, INSTR(s3Key, '/') + 1), '/') + 1
+            ),
+            '/'
+        ) - 1
+    ) AS drawingId,
+    id AS fileId,
+    userId,
+    s3Key,
+    mimeType,
+    createdAt
+FROM "S3File"
+-- Only attempt the parse for keys that have at least three '/' (the
+-- typical default-prefix shape). Other rows are dropped.
+WHERE LENGTH(s3Key) - LENGTH(REPLACE(s3Key, '/', '')) >= 3
+  AND INSTR(
+        SUBSTR(
+            SUBSTR(s3Key, INSTR(s3Key, '/') + 1),
+            INSTR(SUBSTR(s3Key, INSTR(s3Key, '/') + 1), '/') + 1
+        ),
+        '/'
+      ) > 1;
+
+DROP TABLE "S3File";
+ALTER TABLE "new_S3File" RENAME TO "S3File";
 
 CREATE INDEX "S3File_userId_idx" ON "S3File"("userId");
 CREATE INDEX "S3File_drawingId_idx" ON "S3File"("drawingId");
