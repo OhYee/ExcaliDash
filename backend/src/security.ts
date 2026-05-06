@@ -496,8 +496,11 @@ export const sanitizeDrawingData = (data: {
       // path. Backend file-storage code uses the fileId as a path segment,
       // so a malicious key like "../../foo" must never reach the uploader
       // or the database row. Same regex as backend/src/routes/files.ts.
+      // Snapshot the key list before mutating: deleting properties while
+      // iterating with `for...in` can skip entries depending on engine
+      // ordering, leaving an unsafe key in place.
       const VALID_FILE_ID = /^[\w-]{1,200}$/;
-      for (const fileId in sanitizedFiles) {
+      for (const fileId of Object.keys(sanitizedFiles)) {
         if (!VALID_FILE_ID.test(fileId)) {
           delete sanitizedFiles[fileId];
         }
@@ -536,8 +539,11 @@ export const sanitizeDrawingData = (data: {
                   } else {
                     file[key] = value;
                   }
-                } else if (/^https:\/\//i.test(value)) {
-                  // S3 / CDN public URL — validate format, no HTML injection risk.
+                } else if (/^https?:\/\//i.test(value)) {
+                  // S3 / CDN public URL — validate format, no HTML
+                  // injection risk. Both http:// and https:// are
+                  // accepted because S3_PUBLIC_URL may legitimately be
+                  // a plain-HTTP MinIO / dev endpoint.
                   const hasSuspiciousContent = suspiciousPatterns.some(
                     (pattern) => pattern.test(value)
                   );

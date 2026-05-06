@@ -265,8 +265,6 @@ export const Editor: React.FC = () => {
   const pendingRemoteElementOrderRef = useRef<string[] | null>(null);
   const remoteFlushScheduledRef = useRef(false);
   const remoteFlushRafIdRef = useRef<number | null>(null);
-  /** File IDs present at initial drawing load — skip S3 re-upload for these. */
-  const initialFileIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     setAutoHideEnabled(getStoredAutoHideEnabled());
@@ -1323,7 +1321,6 @@ export const Editor: React.FC = () => {
         latestFilesRef.current = files;
         lastSyncedFilesRef.current = files;
         lastPersistedFilesRef.current = files;
-        initialFileIdsRef.current = new Set(Object.keys(files));
         currentDrawingVersionRef.current = typeof data.version === "number" ? data.version : null;
         lastPersistedElementsRef.current = elements;
 

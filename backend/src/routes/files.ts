@@ -46,10 +46,11 @@ export const registerFileRoutes = (
   );
 
   // ------------------------------------------------------------------
-  // GET /files/:fileId
+  // GET /files/:drawingId/:fileId
   // Issues a presigned GET URL and redirects the browser to S3.
   // Used only in private-bucket deployments where S3_PUBLIC_URL is not
-  // set and the dataURL stored in the drawing is "/api/files/:fileId".
+  // set and the dataURL stored in the drawing is
+  // "/api/files/:drawingId/:fileId".
   // ------------------------------------------------------------------
   app.get(
     "/files/:drawingId/:fileId",

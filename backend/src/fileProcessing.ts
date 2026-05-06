@@ -67,7 +67,12 @@ export const processFilesForS3 = async (
   const cfg = getS3Config()!;
   const result: Record<string, any> = { ...files };
 
-  const uploadTasks = Object.entries(files).map(async ([fileId, file]) => {
+  // Bound parallel S3 PUTs. Without this, a paste of N images fires N
+  // parallel uploads, which can spike S3 connection pools and produce
+  // inconsistent partial-failure states on shaky networks.
+  const UPLOAD_CONCURRENCY = 8;
+
+  const processFile = async ([fileId, file]: [string, any]): Promise<void> => {
     if (!VALID_FILE_ID.test(fileId)) {
       // Reject path-traversal candidates rather than silently uploading
       // them under a forged S3 key. Drop from output so the bad entry
@@ -107,9 +112,14 @@ export const processFilesForS3 = async (
     });
 
     result[fileId] = { ...file, dataURL: accessUrl };
-  });
+  };
 
-  await Promise.all(uploadTasks);
+  const entries = Object.entries(files);
+  for (let i = 0; i < entries.length; i += UPLOAD_CONCURRENCY) {
+    await Promise.all(
+      entries.slice(i, i + UPLOAD_CONCURRENCY).map(processFile),
+    );
+  }
 
   return result;
 };
