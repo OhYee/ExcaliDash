@@ -686,22 +686,42 @@ export const updateLibrary = async (items: LibraryItem[]): Promise<LibraryItem[]
 // S3 file upload helpers
 // ---------------------------------------------------------------------------
 
-/** Cache the result of the /files/config probe so we only call it once. */
+/** Cached resolved result, settled successfully at least once. */
 let s3EnabledCache: boolean | null = null;
+/**
+ * In-flight promise so concurrent callers (e.g. many `DrawingCard`s
+ * mounting at once) coalesce onto a single `/files/config` request
+ * instead of stampeding the backend, and so a transient failure on
+ * one caller doesn't poison the cache for everyone.
+ */
+let s3EnabledInFlight: Promise<boolean> | null = null;
 
 /**
  * Returns true when the backend has S3 configured.
- * The result is cached for the lifetime of the page.
+ * The successful result is cached for the lifetime of the page; on a
+ * transient request failure we let the next caller retry rather than
+ * permanently latching to false.
  */
 export const isS3Enabled = async (): Promise<boolean> => {
   if (s3EnabledCache !== null) return s3EnabledCache;
-  try {
-    const response = await api.get<{ s3Enabled: boolean }>("/files/config");
-    s3EnabledCache = response.data.s3Enabled === true;
-  } catch {
-    s3EnabledCache = false;
-  }
-  return s3EnabledCache;
+  if (s3EnabledInFlight) return s3EnabledInFlight;
+
+  s3EnabledInFlight = (async () => {
+    try {
+      const response = await api.get<{ s3Enabled: boolean }>("/files/config");
+      s3EnabledCache = response.data.s3Enabled === true;
+      return s3EnabledCache;
+    } catch {
+      // Don't cache failures — a transient 401 during auth bootstrap or
+      // a network blip would otherwise permanently disable S3 for the
+      // rest of the page lifetime.
+      return false;
+    } finally {
+      s3EnabledInFlight = null;
+    }
+  })();
+
+  return s3EnabledInFlight;
 };
 
 // ---------------------------------------------------------------------------
